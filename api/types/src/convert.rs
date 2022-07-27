@@ -13,7 +13,7 @@ use crate::{
     TransactionInfo, TransactionOnChainData, TransactionPayload, UserTransactionRequest, WriteSet,
     WriteSetChange, WriteSetPayload,
 };
-use anyhow::{bail, ensure, format_err, Result};
+use anyhow::{bail, ensure, format_err, Context as AnyhowContext, Result};
 use aptos_crypto::{hash::CryptoHash, HashValue};
 use aptos_transaction_builder::error_explain;
 use aptos_types::state_store::table::TableHandle;
@@ -384,7 +384,8 @@ impl<'a, R: MoveResolverExt + ?Sized> MoveConverter<'a, R> {
         Ok(RawTransaction::new(
             sender.into(),
             sequence_number.into(),
-            self.try_into_aptos_core_transaction_payload(payload)?,
+            self.try_into_aptos_core_transaction_payload(payload)
+                .context("Failed to parse transaction payload")?,
             max_gas_amount.into(),
             gas_unit_price.into(),
             expiration_timestamp_secs.into(),
@@ -494,7 +495,7 @@ impl<'a, R: MoveResolverExt + ?Sized> MoveConverter<'a, R> {
             arg_types
                 .into_iter()
                 .map(|t| t.json_type_name())
-                .collect::<Vec<String>>()
+                .collect::<Result<Vec<String>>>()?
                 .join(", "),
             args.len(),
             args,
@@ -504,14 +505,9 @@ impl<'a, R: MoveResolverExt + ?Sized> MoveConverter<'a, R> {
             .zip(args.into_iter())
             .enumerate()
             .map(|(i, (arg_type, arg))| {
-                self.try_into_vm_value(&arg_type.clone().try_into()?, arg)
+                self.try_into_vm_value(&arg_type.try_into()?, arg)
                     .map_err(|e| {
-                        format_err!(
-                            "parse arguments[{}] failed, expect {}, caused by error: {}",
-                            i,
-                            arg_type.json_type_name(),
-                            e,
-                        )
+                        format_err!("parse arguments[{}] failed, caused by error: {}", i, e,)
                     })
             })
             .collect::<Result<_>>()
