@@ -183,13 +183,12 @@ if [ "$FORGE_RUNNER_MODE" = "local" ]; then
     fi
 
 elif [ "$FORGE_RUNNER_MODE" = "k8s" ]; then
-    # try deleting existing forge pod of same name
-    # since forge test runner will run in a pod that matches the namespace
-    # this will pre-empt the existing forge test in the same namespace and ensures
-    # we do not have any dangling test runners
-    FORGE_POD_NAME=$FORGE_NAMESPACE
-    kubectl delete pod -n default $FORGE_POD_NAME || true
-    kubectl wait -n default --for=delete "pod/${FORGE_POD_NAME}" || true
+    # try deleting pod corresponding to the same forge test (namespace, image_tag/git_ref)
+    # this will pre-empt the existing forge test and ensures we do not have any dangling test runners
+    FORGE_POD_NAME="${FORGE_NAMESPACE}-${IMAGE_TAG}"
+    FORGE_POD_NAME=${FORGE_POD_NAME:0:64}
+    kubectl delete pod -n default -l "forge-namespace=${FORGE_NAMESPACE}" || true
+    kubectl wait -n default --for=delete pod -l "forge-namespace=${FORGE_NAMESPACE}" || true
 
     specfile=$(mktemp)
     echo "Forge test-runner pod Spec : ${specfile}"
