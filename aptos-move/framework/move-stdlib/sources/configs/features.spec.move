@@ -66,10 +66,6 @@ spec std::features {
         spec_is_enabled(FEE_PAYER_ENABLED)
     }
 
-    spec fun spec_collect_and_distribute_gas_fees_enabled(): bool {
-        spec_is_enabled(COLLECT_AND_DISTRIBUTE_GAS_FEES)
-    }
-
     spec fun spec_module_event_enabled(): bool {
         spec_is_enabled(MODULE_EVENT)
     }
@@ -96,12 +92,33 @@ spec std::features {
         ensures [abstract] result == spec_module_event_enabled();
     }
 
-    spec on_new_epoch(vm_or_framework: &signer) {
-        let addr = signer::address_of(vm_or_framework);
-        aborts_if addr != @std && addr != @vm;
-        aborts_if exists<PendingFeatures>(@std) && !exists<Features>(@std);
+    spec fun spec_abort_if_multisig_payload_mismatch_enabled(): bool {
+        spec_is_enabled(ABORT_IF_MULTISIG_PAYLOAD_MISMATCH)
+    }
+
+    spec fun spec_new_accounts_default_to_fa_apt_store_enabled(): bool {
+        spec_is_enabled(NEW_ACCOUNTS_DEFAULT_TO_FA_APT_STORE)
+    }
+
+    spec fun spec_simulation_enhancement_enabled(): bool {
+        spec_is_enabled(TRANSACTION_SIMULATION_ENHANCEMENT)
+    }
+
+    spec abort_if_multisig_payload_mismatch_enabled {
+        pragma opaque;
+        aborts_if [abstract] false;
+        ensures [abstract] result == spec_abort_if_multisig_payload_mismatch_enabled();
+    }
+
+    spec on_new_epoch(framework: &signer) {
+        requires @std == signer::address_of(framework);
         let features_pending = global<PendingFeatures>(@std).features;
         let post features_std = global<Features>(@std).features;
         ensures exists<PendingFeatures>(@std) ==> features_std == features_pending;
+        aborts_if false;
+    }
+
+    spec fun spec_sha_512_and_ripemd_160_enabled(): bool {
+        spec_is_enabled(SHA_512_AND_RIPEMD_160_NATIVES)
     }
 }

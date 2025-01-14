@@ -219,11 +219,6 @@ async function main() {
   // dry run
   console.log(`INFO: dry run: ${parsedArgs.DRY_RUN}`);
 
-  // Assert if we have a release version that the version matches the cargo version
-  if (isReleaseImage(parsedArgs.IMAGE_TAG_PREFIX)) {
-    assertTagMatchesSourceVersion(parsedArgs.IMAGE_TAG_PREFIX);
-  }
-
   // get the appropriate release group based on the image tag prefix
   const imageReleaseGroup = getImageReleaseGroupByImageTagPrefix(parsedArgs.IMAGE_TAG_PREFIX);
   console.log(`INFO: image release group: ${imageReleaseGroup}`);
@@ -254,6 +249,7 @@ async function main() {
           const imageTarget = `${targetRegistry}/${image}:${joinTagSegments(parsedArgs.IMAGE_TAG_PREFIX, profilePrefix, featureSuffix)}`;
           console.info(chalk.green(`INFO: copying ${imageSource} to ${imageTarget}`));
           if (parsedArgs.DRY_RUN) {
+            console.info(chalk.yellow(`INFO: skipping copy of ${imageSource} to ${imageTarget} due to dry run`));
             continue;
           }
           await waitForImageToBecomeAvailable(imageSource, parsedArgs.WAIT_FOR_IMAGE_SECONDS);

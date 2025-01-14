@@ -11,7 +11,8 @@ use aptos_types::{
     contract_event::ContractEvent, state_store::state_key::StateKey, write_set::WriteOpSize,
 };
 use aptos_vm_types::{
-    change_set::VMChangeSet, resolver::ExecutorView, storage::space_pricing::ChargeAndRefund,
+    change_set::ChangeSetInterface, module_and_script_storage::module_storage::AptosModuleStorage,
+    resolver::ExecutorView, storage::space_pricing::ChargeAndRefund,
 };
 use move_binary_format::{
     errors::{Location, PartialVMResult, VMResult},
@@ -34,6 +35,7 @@ pub struct GasProfiler<G> {
     base: G,
 
     intrinsic_cost: Option<InternalGas>,
+    keyless_cost: Option<InternalGas>,
     dependencies: Vec<Dependency>,
     frames: Vec<CallFrame>,
     transaction_transient: Option<InternalGas>,
@@ -90,6 +92,7 @@ impl<G> GasProfiler<G> {
             base,
 
             intrinsic_cost: None,
+            keyless_cost: None,
             dependencies: vec![],
             frames: vec![CallFrame::new_script()],
             transaction_transient: None,
@@ -109,6 +112,7 @@ impl<G> GasProfiler<G> {
             base,
 
             intrinsic_cost: None,
+            keyless_cost: None,
             dependencies: vec![],
             frames: vec![CallFrame::new_function(module_id, func_name, ty_args)],
             transaction_transient: None,
@@ -565,10 +569,11 @@ where
 
     fn process_storage_fee_for_all(
         &mut self,
-        change_set: &mut VMChangeSet,
+        change_set: &mut impl ChangeSetInterface,
         txn_size: NumBytes,
         gas_unit_price: FeePerGasUnit,
         executor_view: &dyn ExecutorView,
+        module_storage: &impl AptosModuleStorage,
     ) -> VMResult<Fee> {
         // The new storage fee are only active since version 7.
         if self.feature_version() < 7 {
@@ -589,7 +594,7 @@ where
         let mut write_fee = Fee::new(0);
         let mut write_set_storage = vec![];
         let mut total_refund = Fee::new(0);
-        for res in change_set.write_op_info_iter_mut(executor_view) {
+        for res in change_set.write_op_info_iter_mut(executor_view, module_storage) {
             let write_op_info = res.map_err(|err| err.finish(Location::Undefined))?;
             let key = write_op_info.key.clone();
             let op_type = write_op_type(&write_op_info.op_size);
@@ -609,7 +614,7 @@ where
         // Events (no event fee in v2)
         let mut event_fee = Fee::new(0);
         let mut event_fees = vec![];
-        for (event, _) in change_set.events().iter() {
+        for event in change_set.events_iter() {
             let fee = pricing.legacy_storage_fee_per_event(params, event);
             event_fees.push(EventStorage {
                 ty: event.type_tag().clone(),
@@ -650,6 +655,14 @@ where
 
         res
     }
+
+    fn charge_keyless(&mut self) -> VMResult<()> {
+        let (_cost, res) = self.delegate_charge(|base| base.charge_keyless());
+
+        // TODO: add keyless
+
+        res
+    }
 }
 
 impl<G> GasProfiler<G>
@@ -667,6 +680,7 @@ where
             gas_scaling_factor: self.base.gas_unit_scaling_factor(),
             total: self.algebra().execution_gas_used() + self.algebra().io_gas_used(),
             intrinsic_cost: self.intrinsic_cost.unwrap_or_else(|| 0.into()),
+            keyless_cost: self.keyless_cost.unwrap_or_else(|| 0.into()),
             dependencies: self.dependencies,
             call_graph: self.frames.pop().expect("frame must exist"),
             transaction_transient: self.transaction_transient,

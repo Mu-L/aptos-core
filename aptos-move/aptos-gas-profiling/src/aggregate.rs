@@ -6,15 +6,12 @@ use crate::{
     render::{Render, TableKey},
 };
 use aptos_gas_algebra::{GasQuantity, GasScalingFactor, InternalGas};
-use aptos_types::state_store::state_key::StateKeyInner;
-use std::{
-    collections::{btree_map, BTreeMap},
-    ops::Deref,
-};
+use std::collections::{btree_map, BTreeMap};
 
 /// Represents an aggregation of execution gas events, including the count and total gas costs for each type of event.
 ///
 /// The events are sorted by the amount of gas used, from high to low.
+#[derive(Debug)]
 pub struct AggregatedExecutionGasEvents {
     /// The gas scaling factor.
     /// This is included so to make this struct self-contained, suitable for displaying in (external) gas units.
@@ -116,9 +113,9 @@ impl ExecutionAndIOCosts {
         }
 
         for write in &self.write_set_transient {
-            use StateKeyInner::*;
+            use aptos_types::state_store::state_key::inner::StateKeyInner::*;
 
-            let key = match write.key.deref() {
+            let key = match write.key.inner() {
                 AccessPath(ap) => format!("{}", Render(&ap.get_path())),
                 TableItem { handle, key } => {
                     format!("table_item<{},{}>", Render(handle), TableKey { bytes: key },)

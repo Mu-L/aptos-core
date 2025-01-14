@@ -817,14 +817,15 @@ Key used to track the resolvable time in the proposal's metadata.
                 proposal_type_info: <a href="../../aptos-stdlib/doc/type_info.md#0x1_type_info_type_of">type_info::type_of</a>&lt;ProposalType&gt;(),
             },
         );
+    } <b>else</b> {
+        <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_RegisterForumEvent">RegisterForumEvent</a>&gt;(
+            &<b>mut</b> voting_forum.events.register_forum_events,
+            <a href="voting.md#0x1_voting_RegisterForumEvent">RegisterForumEvent</a> {
+                hosting_account: addr,
+                proposal_type_info: <a href="../../aptos-stdlib/doc/type_info.md#0x1_type_info_type_of">type_info::type_of</a>&lt;ProposalType&gt;(),
+            },
+        );
     };
-    <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_RegisterForumEvent">RegisterForumEvent</a>&gt;(
-        &<b>mut</b> voting_forum.events.register_forum_events,
-        <a href="voting.md#0x1_voting_RegisterForumEvent">RegisterForumEvent</a> {
-            hosting_account: addr,
-            proposal_type_info: <a href="../../aptos-stdlib/doc/type_info.md#0x1_type_info_type_of">type_info::type_of</a>&lt;ProposalType&gt;(),
-        },
-    );
 
     <b>move_to</b>(<a href="account.md#0x1_account">account</a>, voting_forum);
 }
@@ -952,7 +953,7 @@ resolve this proposal.
         <a href="../../aptos-stdlib/doc/simple_map.md#0x1_simple_map_add">simple_map::add</a>(&<b>mut</b> metadata, is_multi_step_in_execution_key, to_bytes(&<b>false</b>));
         // If the proposal is a single-step proposal, we check <b>if</b> the metadata passed by the client <b>has</b> the <a href="voting.md#0x1_voting_IS_MULTI_STEP_PROPOSAL_IN_EXECUTION_KEY">IS_MULTI_STEP_PROPOSAL_IN_EXECUTION_KEY</a> key.
         // If they have the key, we will remove it, because a single-step proposal that doesn't need this key.
-    } <b>else</b> <b>if</b> (<a href="../../aptos-stdlib/doc/simple_map.md#0x1_simple_map_contains_key">simple_map::contains_key</a>(&<b>mut</b> metadata, &is_multi_step_in_execution_key)) {
+    } <b>else</b> <b>if</b> (<a href="../../aptos-stdlib/doc/simple_map.md#0x1_simple_map_contains_key">simple_map::contains_key</a>(&metadata, &is_multi_step_in_execution_key)) {
         <a href="../../aptos-stdlib/doc/simple_map.md#0x1_simple_map_remove">simple_map::remove</a>(&<b>mut</b> metadata, &is_multi_step_in_execution_key);
     };
 
@@ -982,19 +983,19 @@ resolve this proposal.
                 min_vote_threshold,
             },
         );
+    } <b>else</b> {
+        <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_CreateProposalEvent">CreateProposalEvent</a>&gt;(
+            &<b>mut</b> voting_forum.events.create_proposal_events,
+            <a href="voting.md#0x1_voting_CreateProposalEvent">CreateProposalEvent</a> {
+                proposal_id,
+                early_resolution_vote_threshold,
+                execution_hash,
+                expiration_secs,
+                metadata,
+                min_vote_threshold,
+            },
+        );
     };
-    <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_CreateProposalEvent">CreateProposalEvent</a>&gt;(
-        &<b>mut</b> voting_forum.events.create_proposal_events,
-        <a href="voting.md#0x1_voting_CreateProposalEvent">CreateProposalEvent</a> {
-            proposal_id,
-            early_resolution_vote_threshold,
-            execution_hash,
-            expiration_secs,
-            metadata,
-            min_vote_threshold,
-        },
-    );
-
     proposal_id
 }
 </code></pre>
@@ -1066,11 +1067,12 @@ This guarantees that voting eligibility and voting power are controlled by the r
 
     <b>if</b> (std::features::module_event_migration_enabled()) {
         <a href="event.md#0x1_event_emit">event::emit</a>(<a href="voting.md#0x1_voting_Vote">Vote</a> { proposal_id, num_votes });
+    } <b>else</b> {
+        <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_VoteEvent">VoteEvent</a>&gt;(
+            &<b>mut</b> voting_forum.events.vote_events,
+            <a href="voting.md#0x1_voting_VoteEvent">VoteEvent</a> { proposal_id, num_votes },
+        );
     };
-    <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_VoteEvent">VoteEvent</a>&gt;(
-        &<b>mut</b> voting_forum.events.vote_events,
-        <a href="voting.md#0x1_voting_VoteEvent">VoteEvent</a> { proposal_id, num_votes },
-    );
 }
 </code></pre>
 
@@ -1174,16 +1176,17 @@ there are more yes votes than no. If either of these conditions is not met, this
                 resolved_early,
             },
         );
+    } <b>else</b> {
+        <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_ResolveProposal">ResolveProposal</a>&gt;(
+            &<b>mut</b> voting_forum.events.resolve_proposal_events,
+            <a href="voting.md#0x1_voting_ResolveProposal">ResolveProposal</a> {
+                proposal_id,
+                yes_votes: proposal.yes_votes,
+                no_votes: proposal.no_votes,
+                resolved_early,
+            },
+        );
     };
-    <a href="event.md#0x1_event_emit_event">event::emit_event</a>&lt;<a href="voting.md#0x1_voting_ResolveProposal">ResolveProposal</a>&gt;(
-        &<b>mut</b> voting_forum.events.resolve_proposal_events,
-        <a href="voting.md#0x1_voting_ResolveProposal">ResolveProposal</a> {
-            proposal_id,
-            yes_votes: proposal.yes_votes,
-            no_votes: proposal.no_votes,
-            resolved_early,
-        },
-    );
 
     <a href="../../aptos-stdlib/../move-stdlib/doc/option.md#0x1_option_extract">option::extract</a>(&<b>mut</b> proposal.execution_content)
 }
@@ -1283,17 +1286,17 @@ there are more yes votes than no. If either of these conditions is not met, this
                 resolved_early,
             },
         );
+    } <b>else</b> {
+        <a href="event.md#0x1_event_emit_event">event::emit_event</a>(
+            &<b>mut</b> voting_forum.events.resolve_proposal_events,
+            <a href="voting.md#0x1_voting_ResolveProposal">ResolveProposal</a> {
+                proposal_id,
+                yes_votes: proposal.yes_votes,
+                no_votes: proposal.no_votes,
+                resolved_early,
+            },
+        );
     };
-    <a href="event.md#0x1_event_emit_event">event::emit_event</a>(
-        &<b>mut</b> voting_forum.events.resolve_proposal_events,
-        <a href="voting.md#0x1_voting_ResolveProposal">ResolveProposal</a> {
-            proposal_id,
-            yes_votes: proposal.yes_votes,
-            no_votes: proposal.no_votes,
-            resolved_early,
-        },
-    );
-
 }
 </code></pre>
 
@@ -2135,7 +2138,8 @@ Return true if the voting period of the given proposal has already ended.
 
 
 
-<pre><code><b>requires</b> <a href="chain_status.md#0x1_chain_status_is_operating">chain_status::is_operating</a>();
+<pre><code><b>pragma</b> verify_duration_estimate = 300;
+<b>requires</b> <a href="chain_status.md#0x1_chain_status_is_operating">chain_status::is_operating</a>();
 <b>include</b> <a href="voting.md#0x1_voting_IsProposalResolvableAbortsIf">IsProposalResolvableAbortsIf</a>&lt;ProposalType&gt;;
 <b>let</b> voting_forum = <b>global</b>&lt;<a href="voting.md#0x1_voting_VotingForum">VotingForum</a>&lt;ProposalType&gt;&gt;(voting_forum_address);
 <b>let</b> proposal = <a href="../../aptos-stdlib/doc/table.md#0x1_table_spec_get">table::spec_get</a>(voting_forum.proposals, proposal_id);

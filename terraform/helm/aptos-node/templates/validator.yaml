@@ -7,6 +7,13 @@ metadata:
   labels:
     {{- include "aptos-validator.labels" $ | nindent 4 }}
     {{- include "aptos-validator.multiclusterLabels" (tuple $ $i) | nindent 4 }} 
+  annotations:
+    {{- with $.Values.service.validator.internal.annotations }}
+    {{- toYaml $.Values.service.validator.internal.annotations | nindent 4 }}
+    {{- end }}
+    {{- if $.Values.service.internalDomain }}
+    external-dns.alpha.kubernetes.io/hostname: val{{$i}}.{{ $.Values.service.internalDomain }}
+    {{- end }}
 spec:
   selector:
     {{- include "aptos-validator.selectorLabels" $ | nindent 4 }}
@@ -77,19 +84,27 @@ spec:
         {{- include "aptos-validator.selectorLabels" $ | nindent 8 }}
         app.kubernetes.io/name: validator
         app.kubernetes.io/instance: validator-{{$i}}
+        {{- if $.Values.chain.name }}
+        chain_name: {{ $.Values.chain.name }}
+        {{- end}}
       annotations:
         checksum/validator.yaml: {{ tpl ($.Files.Get "files/configs/validator.yaml") $ | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/port: "9101"
+        {{- if $.Values.metrics.destination }}
+        aptos.dev/metrics-destination: {{ $.Values.metrics.destination }}
+        {{- end}}
+        {{- with $.Values.fullnode.podAnnotations }}
+        {{- toYaml $.Values.fullnode.podAnnotations | nindent 8 }}
+        {{- end }}
     spec:
-      terminationGracePeriodSeconds: 0
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
         - name: run-script
           image: curlimages/curl:latest
-          command:
+          args:
             - sh
             - -c
             - |
@@ -119,7 +134,7 @@ spec:
         {{- end }}
       {{- with $.Values.validator }}
         imagePullPolicy: {{ .image.pullPolicy }}
-        command:
+        args:
           - /bin/bash
           - -c
           - |-
@@ -130,7 +145,7 @@ spec:
               # Delete the command file so we only wipe the DB once
               rm -vf /opt/aptos/data/wipe-db
             fi
-            /usr/local/bin/aptos-node -f /opt/aptos/etc/validator.yaml
+            exec /usr/local/bin/aptos-node -f /opt/aptos/etc/validator.yaml
         resources:
           {{- toYaml .resources | nindent 10 }}
         env:
@@ -176,7 +191,7 @@ spec:
             - ALL
           {{- end }}
       {{- with $.Values.validator }}
-      {{- with $.nodeSelector }}
+      {{- with .nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -199,6 +214,8 @@ spec:
         runAsGroup: 6180
         fsGroup: 6180
         {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
       {{- end }}
       volumes:
       - name: aptos-config

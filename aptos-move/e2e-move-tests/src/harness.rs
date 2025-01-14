@@ -9,15 +9,18 @@ use aptos_gas_schedule::{
     AptosGasParameters, FromOnChainGasSchedule, InitialGasSchedule, ToOnChainGasSchedule,
 };
 use aptos_language_e2e_tests::{
-    account::{Account, AccountData, TransactionBuilder},
+    account::{Account, TransactionBuilder},
     executor::FakeExecutor,
 };
 use aptos_types::{
-    access_path::AccessPath,
     account_address::AccountAddress,
-    account_config::{AccountResource, CoinStoreResource, CORE_CODE_ADDRESS},
+    account_config::{
+        fungible_store::FungibleStoreResource, object::ObjectGroupResource, AccountResource,
+        CoinStoreResource, CORE_CODE_ADDRESS,
+    },
     chain_id::ChainId,
     contract_event::ContractEvent,
+    fee_statement::FeeStatement,
     move_utils::MemberId,
     on_chain_config::{FeatureFlag, GasScheduleV2, OnChainConfig},
     state_store::{
@@ -25,11 +28,12 @@ use aptos_types::{
         state_value::{StateValue, StateValueMetadata},
     },
     transaction::{
-        EntryFunction, Script, SignedTransaction, TransactionArgument, TransactionOutput,
-        TransactionPayload, TransactionStatus, ViewFunctionOutput,
+        EntryFunction, Multisig, MultisigTransactionPayload, Script, SignedTransaction,
+        TransactionArgument, TransactionOutput, TransactionPayload, TransactionStatus,
+        ViewFunctionOutput,
     },
+    AptosCoinType,
 };
-use aptos_vm::{data_cache::AsMoveResolver, AptosVM};
 use claims::assert_ok;
 use move_core_types::{
     language_storage::{StructTag, TypeTag},
@@ -76,8 +80,8 @@ pub struct MoveHarness {
     /// The last counted transaction sequence number, by account address.
     txn_seq_no: BTreeMap<AccountAddress, u64>,
 
-    default_gas_unit_price: u64,
-    max_gas_per_txn: u64,
+    pub default_gas_unit_price: u64,
+    pub max_gas_per_txn: u64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -151,8 +155,9 @@ impl MoveHarness {
     }
 
     pub fn store_and_fund_account(&mut self, acc: &Account, balance: u64, seq_num: u64) -> Account {
-        let data = AccountData::with_account(acc.clone(), balance, seq_num);
-        self.executor.add_account_data(&data);
+        let data = self
+            .executor
+            .store_and_fund_account(acc.clone(), balance, seq_num);
         self.txn_seq_no.insert(*acc.address(), seq_num);
         data.account().clone()
     }
@@ -160,10 +165,14 @@ impl MoveHarness {
     /// Creates an account for the given static address. This address needs to be static so
     /// we can load regular Move code to there without need to rewrite code addresses.
     pub fn new_account_at(&mut self, addr: AccountAddress) -> Account {
+        self.new_account_with_balance_at(addr, 1_000_000_000_000_000)
+    }
+
+    pub fn new_account_with_balance_at(&mut self, addr: AccountAddress, balance: u64) -> Account {
         // The below will use the genesis keypair but that should be fine.
         let acc = Account::new_genesis_account(addr);
         // Mint the account 10M Aptos coins (with 8 decimals).
-        self.store_and_fund_account(&acc, 1_000_000_000_000_000, 10)
+        self.store_and_fund_account(&acc, balance, 10)
     }
 
     // Creates an account with a randomly generated address and key pair
@@ -244,8 +253,8 @@ impl MoveHarness {
         account: &Account,
         payload: TransactionPayload,
     ) -> TransactionBuilder {
-        let on_chain_seq_no = self.sequence_number(account.address());
-        let seq_no_ref = self.txn_seq_no.get_mut(account.address()).unwrap();
+        let on_chain_seq_no = self.sequence_number_opt(account.address()).unwrap_or(0);
+        let seq_no_ref = self.txn_seq_no.entry(*account.address()).or_insert(0);
         let seq_no = std::cmp::max(on_chain_seq_no, *seq_no_ref);
         *seq_no_ref = seq_no + 1;
         account
@@ -313,7 +322,7 @@ impl MoveHarness {
         &mut self,
         account: &Account,
         payload: TransactionPayload,
-    ) -> (TransactionGasLog, u64) {
+    ) -> (TransactionGasLog, u64, Option<FeeStatement>) {
         let txn = self.create_transaction_payload(account, payload);
         let (output, gas_log) = self
             .executor
@@ -322,7 +331,11 @@ impl MoveHarness {
         if matches!(output.status(), TransactionStatus::Keep(_)) {
             self.executor.apply_write_set(output.write_set());
         }
-        (gas_log, output.gas_used())
+        (
+            gas_log,
+            output.gas_used(),
+            output.try_extract_fee_statement().unwrap(),
+        )
     }
 
     /// Creates a transaction which runs the specified entry point `fun`. Arguments need to be
@@ -349,6 +362,22 @@ impl MoveHarness {
         )
     }
 
+    /// Create a multisig transaction.
+    pub fn create_multisig(
+        &mut self,
+        account: &Account,
+        multisig_address: AccountAddress,
+        transaction_payload: Option<MultisigTransactionPayload>,
+    ) -> SignedTransaction {
+        self.create_transaction_payload(
+            account,
+            TransactionPayload::Multisig(Multisig {
+                multisig_address,
+                transaction_payload,
+            }),
+        )
+    }
+
     pub fn create_script(
         &mut self,
         account: &Account,
@@ -371,6 +400,17 @@ impl MoveHarness {
         args: Vec<Vec<u8>>,
     ) -> TransactionStatus {
         let txn = self.create_entry_function(account, fun, ty_args, args);
+        self.run(txn)
+    }
+
+    /// Run the multisig transaction.
+    pub fn run_multisig(
+        &mut self,
+        account: &Account,
+        multisig_address: AccountAddress,
+        transaction_payload: Option<MultisigTransactionPayload>,
+    ) -> TransactionStatus {
+        let txn = self.create_multisig(account, multisig_address, transaction_payload);
         self.run(txn)
     }
 
@@ -473,7 +513,7 @@ impl MoveHarness {
         options: Option<BuildOptions>,
         patch_metadata: impl FnMut(&mut PackageMetadata),
     ) -> SignedTransaction {
-        let package = build_package(path.to_owned(), options.unwrap_or_default())
+        let package = BuiltPackage::build(path.to_owned(), options.unwrap_or_default())
             .expect("building package must succeed");
         self.create_publish_built_package(account, &package, patch_metadata)
     }
@@ -595,7 +635,7 @@ impl MoveHarness {
         &mut self,
         account: &Account,
         path: &Path,
-    ) -> (TransactionGasLog, u64) {
+    ) -> (TransactionGasLog, u64, Option<FeeStatement>) {
         let txn = self.create_publish_package(account, path, None, |_| {});
         let (output, gas_log) = self
             .executor
@@ -604,7 +644,11 @@ impl MoveHarness {
         if matches!(output.status(), TransactionStatus::Keep(_)) {
             self.executor.apply_write_set(output.write_set());
         }
-        (gas_log, output.gas_used())
+        (
+            gas_log,
+            output.gas_used(),
+            output.try_extract_fee_statement().unwrap(),
+        )
     }
 
     /// Runs transaction which publishes the Move Package.
@@ -682,9 +726,7 @@ impl MoveHarness {
         addr: &AccountAddress,
         struct_tag: StructTag,
     ) -> Option<Vec<u8>> {
-        let path =
-            AccessPath::resource_access_path(*addr, struct_tag).expect("access path in test");
-        self.read_state_value_bytes(&StateKey::access_path(path))
+        self.read_state_value_bytes(&StateKey::resource(addr, &struct_tag).unwrap())
     }
 
     /// Reads the resource data `T`.
@@ -706,10 +748,17 @@ impl MoveHarness {
         addr: &AccountAddress,
         struct_tag: StructTag,
     ) -> Option<StateValueMetadata> {
-        self.read_state_value(&StateKey::access_path(
-            AccessPath::resource_access_path(*addr, struct_tag).expect("access path in test"),
-        ))
-        .map(StateValue::into_metadata)
+        self.read_state_value(&StateKey::resource(addr, &struct_tag).unwrap())
+            .map(StateValue::into_metadata)
+    }
+
+    pub fn read_resource_group_metadata(
+        &self,
+        addr: &AccountAddress,
+        struct_tag: StructTag,
+    ) -> Option<StateValueMetadata> {
+        self.read_state_value(&StateKey::resource_group(addr, &struct_tag))
+            .map(StateValue::into_metadata)
     }
 
     pub fn read_resource_group(
@@ -717,8 +766,7 @@ impl MoveHarness {
         addr: &AccountAddress,
         struct_tag: StructTag,
     ) -> Option<BTreeMap<StructTag, Vec<u8>>> {
-        let path = AccessPath::resource_group_access_path(*addr, struct_tag);
-        self.read_state_value_bytes(&StateKey::access_path(path))
+        self.read_state_value_bytes(&StateKey::resource_group(addr, &struct_tag))
             .map(|data| bcs::from_bytes(&data).unwrap())
     }
 
@@ -742,9 +790,20 @@ impl MoveHarness {
     }
 
     pub fn read_aptos_balance(&self, addr: &AccountAddress) -> u64 {
-        self.read_resource::<CoinStoreResource>(addr, CoinStoreResource::struct_tag())
-            .unwrap()
-            .coin()
+        self.read_resource::<CoinStoreResource<AptosCoinType>>(
+            addr,
+            CoinStoreResource::<AptosCoinType>::struct_tag(),
+        )
+        .map(|c| c.coin())
+        .unwrap_or(0)
+            + self
+                .read_resource_from_resource_group::<FungibleStoreResource>(
+                    &aptos_types::account_config::fungible_store::primary_apt_store(*addr),
+                    ObjectGroupResource::struct_tag(),
+                    FungibleStoreResource::struct_tag(),
+                )
+                .map(|c| c.balance())
+                .unwrap_or(0)
     }
 
     /// Write the resource data `T`.
@@ -755,8 +814,7 @@ impl MoveHarness {
         struct_tag: StructTag,
         data: &T,
     ) {
-        let path = AccessPath::resource_access_path(addr, struct_tag).expect("access path in test");
-        let state_key = StateKey::access_path(path);
+        let state_key = StateKey::resource(&addr, &struct_tag).unwrap();
         self.executor
             .write_state_value(state_key, bcs::to_bytes(data).unwrap());
     }
@@ -822,10 +880,14 @@ impl MoveHarness {
         self.override_one_gas_param("txn.max_transaction_size_in_bytes", 1000 * 1024);
     }
 
-    pub fn sequence_number(&self, addr: &AccountAddress) -> u64 {
+    pub fn sequence_number_opt(&self, addr: &AccountAddress) -> Option<u64> {
         self.read_resource::<AccountResource>(addr, AccountResource::struct_tag())
-            .unwrap()
-            .sequence_number()
+            .as_ref()
+            .map(AccountResource::sequence_number)
+    }
+
+    pub fn sequence_number(&self, addr: &AccountAddress) -> u64 {
+        self.sequence_number_opt(addr).unwrap()
     }
 
     fn chain_id_is_mainnet(&self, addr: &AccountAddress) -> bool {
@@ -861,7 +923,7 @@ impl MoveHarness {
         let gas_schedule: GasScheduleV2 = self.get_gas_schedule();
         let feature_version = gas_schedule.feature_version;
         let params = AptosGasParameters::from_on_chain_gas_schedule(
-            &gas_schedule.to_btree_map(),
+            &gas_schedule.into_btree_map(),
             feature_version,
         )
         .unwrap();
@@ -871,13 +933,6 @@ impl MoveHarness {
     pub fn get_gas_schedule(&self) -> GasScheduleV2 {
         self.read_resource(&CORE_CODE_ADDRESS, GasScheduleV2::struct_tag())
             .unwrap()
-    }
-
-    pub fn new_vm(&self) -> AptosVM {
-        AptosVM::new(
-            &self.executor.data_store().as_move_resolver(),
-            /*override_is_delayed_field_optimization_capable=*/ None,
-        )
     }
 
     pub fn set_default_gas_unit_price(&mut self, gas_unit_price: u64) {
@@ -891,7 +946,7 @@ impl MoveHarness {
         arguments: Vec<Vec<u8>>,
     ) -> ViewFunctionOutput {
         self.executor
-            .execute_view_function(fun.module_id, fun.member_id, type_args, arguments)
+            .execute_view_function(fun, type_args, arguments)
     }
 
     /// Splits transactions into blocks based on passed `block_split``, and

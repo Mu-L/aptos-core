@@ -2,60 +2,70 @@
 // Parts of the project are originally copyright (c) Meta Platforms, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod acquires_checker;
-pub mod ast_simplifier;
 mod bytecode_generator;
-pub mod cyclic_instantiation_checker;
+pub mod diagnostics;
 pub mod env_pipeline;
 mod experiments;
+pub mod external_checks;
 mod file_format_generator;
-pub mod flow_insensitive_checkers;
-pub mod function_checker;
-pub mod inliner;
+pub mod lint_common;
 pub mod logging;
 pub mod options;
 pub mod pipeline;
 pub mod plan_builder;
-pub mod recursive_struct_checker;
-pub mod unused_params_checker;
 
 use crate::{
+    diagnostics::Emitter,
     env_pipeline::{
-        lambda_lifter, lambda_lifter::LambdaLiftingOptions, rewrite_target::RewritingScope,
-        spec_checker, spec_rewriter, EnvProcessorPipeline,
+        acquires_checker, ast_simplifier, cyclic_instantiation_checker, flow_insensitive_checkers,
+        function_checker, inliner, lambda_lifter, lambda_lifter::LambdaLiftingOptions,
+        model_ast_lints, recursive_struct_checker, rewrite_target::RewritingScope,
+        seqs_in_binop_checker, spec_checker, spec_rewriter, unused_params_checker,
+        EnvProcessorPipeline,
     },
     pipeline::{
-        ability_processor::AbilityProcessor, avail_copies_analysis::AvailCopiesAnalysisProcessor,
-        copy_propagation::CopyPropagation, dead_store_elimination::DeadStoreElimination,
+        ability_processor::AbilityProcessor,
+        avail_copies_analysis::AvailCopiesAnalysisProcessor,
+        control_flow_graph_simplifier::ControlFlowGraphSimplifier,
+        copy_propagation::CopyPropagation,
+        dead_store_elimination::DeadStoreElimination,
         exit_state_analysis::ExitStateAnalysisProcessor,
+        flush_writes_processor::FlushWritesProcessor,
+        lint_processor::LintProcessor,
         livevar_analysis_processor::LiveVarAnalysisProcessor,
-        reference_safety_processor::ReferenceSafetyProcessor,
+        reference_safety::{reference_safety_processor_v2, reference_safety_processor_v3},
         split_critical_edges_processor::SplitCriticalEdgesProcessor,
         uninitialized_use_checker::UninitializedUseChecker,
         unreachable_code_analysis::UnreachableCodeProcessor,
-        unreachable_code_remover::UnreachableCodeRemover, variable_coalescing::VariableCoalescing,
+        unreachable_code_remover::UnreachableCodeRemover,
+        unused_assignment_checker::UnusedAssignmentChecker,
+        variable_coalescing::VariableCoalescing,
     },
 };
-use anyhow::bail;
-use codespan_reporting::term::termcolor::{ColorChoice, StandardStream, WriteColor};
-pub use experiments::Experiment;
+use codespan_reporting::{
+    diagnostic::Severity,
+    term::termcolor::{ColorChoice, StandardStream, WriteColor},
+};
+pub use experiments::{Experiment, EXPERIMENTS};
 use log::{debug, info, log_enabled, Level};
-use move_binary_format::binary_views::BinaryIndexedView;
+use move_binary_format::{binary_views::BinaryIndexedView, errors::VMError};
+use move_bytecode_source_map::source_map::SourceMap;
 use move_command_line_common::files::FileHash;
 use move_compiler::{
+    command_line,
     compiled_unit::{
-        verify_units, AnnotatedCompiledModule, AnnotatedCompiledScript, AnnotatedCompiledUnit,
-        CompiledUnit, FunctionInfo, NamedCompiledModule, NamedCompiledScript,
+        AnnotatedCompiledModule, AnnotatedCompiledScript, AnnotatedCompiledUnit, CompiledUnit,
+        FunctionInfo, NamedCompiledModule, NamedCompiledScript,
     },
     diagnostics::FilesSourceText,
     shared::{known_attributes::KnownAttribute, unique_map::UniqueMap},
 };
+use move_core_types::vm_status::StatusType;
 use move_disassembler::disassembler::Disassembler;
 use move_ir_types::location;
 use move_model::{
-    add_move_lang_diagnostics,
-    ast::{Address, ModuleName},
-    model::GlobalEnv,
+    metadata::LanguageVersion,
+    model::{GlobalEnv, Loc, MoveIrLoc},
     PackageInfo,
 };
 use move_stackless_bytecode::function_target_pipeline::{
@@ -63,35 +73,45 @@ use move_stackless_bytecode::function_target_pipeline::{
 };
 use move_symbol_pool::Symbol;
 pub use options::Options;
-use std::{collections::BTreeSet, io::Write, path::Path};
+use std::{collections::BTreeSet, path::Path};
+
+const DEBUG: bool = false;
 
 /// Run Move compiler and print errors to stderr.
 pub fn run_move_compiler_to_stderr(
     options: Options,
 ) -> anyhow::Result<(GlobalEnv, Vec<AnnotatedCompiledUnit>)> {
-    let mut error_writer = StandardStream::stderr(ColorChoice::Auto);
-    run_move_compiler(&mut error_writer, options)
+    let mut stderr = StandardStream::stderr(ColorChoice::Auto);
+    let mut emitter = options.error_emitter(&mut stderr);
+    run_move_compiler(emitter.as_mut(), options)
 }
 
 /// Run move compiler and print errors to given writer. Returns the set of compiled units.
-pub fn run_move_compiler<W>(
-    error_writer: &mut W,
+pub fn run_move_compiler<E>(
+    emitter: &mut E,
     options: Options,
 ) -> anyhow::Result<(GlobalEnv, Vec<AnnotatedCompiledUnit>)>
 where
-    W: WriteColor + Write,
+    E: Emitter + ?Sized,
 {
     logging::setup_logging();
     info!("Move Compiler v2");
 
     // Run context check.
     let mut env = run_checker_and_rewriters(options.clone())?;
-    check_errors(&env, error_writer, "checking errors")?;
+    check_errors(&env, emitter, "checking errors")?;
+
+    if options.experiment_on(Experiment::STOP_BEFORE_STACKLESS_BYTECODE) {
+        std::process::exit(0)
+    }
 
     // Run code generator
     let mut targets = run_bytecode_gen(&env);
-    check_errors(&env, error_writer, "code generation errors")?;
-    debug!("After bytecode_gen, GlobalEnv={}", env.dump_env());
+    check_errors(&env, emitter, "code generation errors")?;
+
+    if DEBUG {
+        debug!("After bytecode_gen, GlobalEnv={}", env.dump_env());
+    }
 
     // Run transformation pipeline
     let pipeline = bytecode_pipeline(&env);
@@ -112,23 +132,30 @@ where
             &dump_base_name,
             false,
             &pipeline::register_formatters,
+            || !env.has_errors(),
         )
     } else {
-        pipeline.run(&env, &mut targets)
+        pipeline.run_with_hook(&env, &mut targets, |_| {}, |_, _, _| !env.has_errors())
     }
-    check_errors(&env, error_writer, "stackless-bytecode analysis errors")?;
+    check_errors(&env, emitter, "stackless-bytecode analysis errors")?;
 
-    let modules_and_scripts = run_file_format_gen(&env, &targets);
-    check_errors(&env, error_writer, "assembling errors")?;
+    if options.experiment_on(Experiment::STOP_BEFORE_FILE_FORMAT) {
+        std::process::exit(0)
+    }
 
-    debug!(
-        "File format bytecode:\n{}",
-        disassemble_compiled_units(&modules_and_scripts)?
-    );
+    let modules_and_scripts = run_file_format_gen(&mut env, &targets);
+    check_errors(&env, emitter, "assembling errors")?;
+
+    if DEBUG {
+        debug!(
+            "File format bytecode:\n{}",
+            disassemble_compiled_units(&modules_and_scripts)?
+        );
+    }
 
     let annotated_units = annotate_units(modules_and_scripts);
     run_bytecode_verifier(&annotated_units, &mut env);
-    check_errors(&env, error_writer, "bytecode verification errors")?;
+    check_errors(&env, emitter, "bytecode verification errors")?;
 
     // Finally mark this model to be generated by v2
     env.set_compiler_v2(true);
@@ -145,66 +172,11 @@ pub fn run_move_compiler_for_analysis(
 ) -> anyhow::Result<GlobalEnv> {
     options.whole_program = true; // will set `treat_everything_as_target`
     options = options.set_experiment(Experiment::SPEC_REWRITE, true);
-    let (mut env, units) = run_move_compiler(error_writer, options)?;
+    options = options.set_experiment(Experiment::ATTACH_COMPILED_MODULE, true);
+    let mut emitter = options.error_emitter(error_writer);
+    let (env, _units) = run_move_compiler(emitter.as_mut(), options)?;
     // Reset for subsequent analysis
     env.treat_everything_as_target(false);
-    // Script pseudo module names are sequentially constructed as `<SELF>_1 .. <SELF>_n`. To
-    // associate the bytecode module by name we need to count the index. This
-    // assumes script modules come out in the same order as they are were
-    // added to the environment.
-    let mut script_index = 0; // script names are named using a sequential index
-    for unit in units {
-        let unit = unit.into_compiled_unit();
-        match unit {
-            CompiledUnit::Module(NamedCompiledModule {
-                package_name: _,
-                address,
-                name,
-                module,
-                source_map,
-            }) => {
-                let name = ModuleName::new(
-                    Address::Numerical(address.into_inner()),
-                    env.symbol_pool().make(name.as_str()),
-                );
-                if let Some(id) = env.find_module(&name).map(|m| m.get_id()) {
-                    env.attach_compiled_module(id, module, source_map)
-                } else {
-                    env.error(
-                        &env.unknown_loc(),
-                        &format!(
-                            "failed to attach bytecode: cannot find module `{}`",
-                            name.display_full(&env)
-                        ),
-                    );
-                }
-            },
-            CompiledUnit::Script(NamedCompiledScript {
-                package_name: _,
-                name: _,
-                script,
-                source_map,
-            }) => {
-                let name = ModuleName::pseudo_script_name(env.symbol_pool(), script_index);
-                script_index += 1;
-                let module = move_model::script_into_module(
-                    script,
-                    &name.name().display(env.symbol_pool()).to_string(),
-                );
-                if let Some(id) = env.find_module(&name).map(|m| m.get_id()) {
-                    env.attach_compiled_module(id, module, source_map)
-                } else {
-                    env.error(
-                        &env.unknown_loc(),
-                        &format!(
-                            "failed to attach bytecode: cannot find script `{}`",
-                            name.display_full(&env)
-                        ),
-                    );
-                }
-            },
-        }
-    }
     Ok(env)
 }
 
@@ -219,6 +191,10 @@ pub fn run_checker(options: Options) -> anyhow::Result<GlobalEnv> {
             sources: options.sources.clone(),
             address_map: addrs.clone(),
         },
+        PackageInfo {
+            sources: options.sources_deps.clone(),
+            address_map: addrs.clone(),
+        },
         vec![PackageInfo {
             sources: options.dependencies.clone(),
             address_map: addrs.clone(),
@@ -230,7 +206,10 @@ pub fn run_checker(options: Options) -> anyhow::Result<GlobalEnv> {
             &options.known_attributes
         },
         options.language_version.unwrap_or_default(),
+        options.warn_deprecated,
+        options.warn_of_deprecation_use_in_aptos_libs,
         options.compile_test_code,
+        options.compile_verify_code,
     )?;
     // Store address aliases
     let map = addrs
@@ -276,7 +255,10 @@ pub fn run_bytecode_gen(env: &GlobalEnv) -> FunctionTargetsHolder {
         if module.is_target() {
             for fun in module.get_functions() {
                 let id = fun.get_qualified_id();
-                todo.insert(id);
+                // Skip inline functions because invoke and lambda are not supported in the current code generator
+                if !fun.is_inline() {
+                    todo.insert(id);
+                }
             }
         }
     }
@@ -297,7 +279,10 @@ pub fn run_bytecode_gen(env: &GlobalEnv) -> FunctionTargetsHolder {
     targets
 }
 
-pub fn run_file_format_gen(env: &GlobalEnv, targets: &FunctionTargetsHolder) -> Vec<CompiledUnit> {
+pub fn run_file_format_gen(
+    env: &mut GlobalEnv,
+    targets: &FunctionTargetsHolder,
+) -> Vec<CompiledUnit> {
     info!("File Format Generation");
     file_format_generator::generate_file_format(env, targets)
 }
@@ -346,6 +331,25 @@ pub fn check_and_rewrite_pipeline<'a, 'b>(
         );
     }
 
+    let check_seqs_in_binops = !options
+        .language_version
+        .unwrap_or_default()
+        .is_at_least(LanguageVersion::V2_0)
+        && options.experiment_on(Experiment::SEQS_IN_BINOPS_CHECK);
+
+    if !for_v1_model && check_seqs_in_binops {
+        env_pipeline.add("binop side effect check", |env| {
+            // This check should be done before inlining.
+            seqs_in_binop_checker::checker(env)
+        });
+    }
+
+    if !for_v1_model && options.experiment_on(Experiment::LINT_CHECKS) {
+        // Perform all the model AST lint checks before AST transformations, to be closer
+        // in form to the user code.
+        env_pipeline.add("model AST lints", model_ast_lints::checker);
+    }
+
     if options.experiment_on(Experiment::INLINING) {
         let keep_inline_funs = options.experiment_on(Experiment::KEEP_INLINE_FUNS);
         env_pipeline.add("inlining", {
@@ -368,11 +372,11 @@ pub fn check_and_rewrite_pipeline<'a, 'b>(
 
     if options.experiment_on(Experiment::AST_SIMPLIFY_FULL) {
         env_pipeline.add("simplifier with code elimination", {
-            move |env: &mut GlobalEnv| ast_simplifier::run_simplifier(env, true)
+            |env: &mut GlobalEnv| ast_simplifier::run_simplifier(env, true)
         });
     } else if options.experiment_on(Experiment::AST_SIMPLIFY) {
         env_pipeline.add("simplifier", {
-            move |env: &mut GlobalEnv| ast_simplifier::run_simplifier(env, false)
+            |env: &mut GlobalEnv| ast_simplifier::run_simplifier(env, false)
         });
     }
 
@@ -404,7 +408,7 @@ pub fn check_and_rewrite_pipeline<'a, 'b>(
     env_pipeline
 }
 
-/// Returns the bytecode processing pipeline.
+/// Returns the stackless bytecode processing pipeline.
 pub fn bytecode_pipeline(env: &GlobalEnv) -> FunctionTargetPipeline {
     let options = env.get_extension::<Options>().expect("options");
     let mut pipeline = FunctionTargetPipeline::default();
@@ -422,14 +426,34 @@ pub fn bytecode_pipeline(env: &GlobalEnv) -> FunctionTargetPipeline {
         pipeline.add_processor(Box::new(UninitializedUseChecker { keep_annotations }));
     }
 
-    // Reference check is always run, but the processor decides internally
-    // based on `Experiment::REFERENCE_SAFETY` whether to report errors.
+    if options.experiment_on(Experiment::UNUSED_ASSIGNMENT_CHECK) {
+        pipeline.add_processor(Box::new(LiveVarAnalysisProcessor::new(false)));
+        pipeline.add_processor(Box::new(UnusedAssignmentChecker {}));
+    }
+
     pipeline.add_processor(Box::new(LiveVarAnalysisProcessor::new(false)));
-    pipeline.add_processor(Box::new(ReferenceSafetyProcessor {}));
+    if options.experiment_on(Experiment::REFERENCE_SAFETY_V3) {
+        pipeline.add_processor(Box::new(
+            reference_safety_processor_v3::ReferenceSafetyProcessor {},
+        ));
+    } else {
+        // Reference check is always run, but the legacy processor decides internally
+        // based on `Experiment::REFERENCE_SAFETY` whether to report errors.
+        pipeline.add_processor(Box::new(
+            reference_safety_processor_v2::ReferenceSafetyProcessor {},
+        ));
+    }
 
     if options.experiment_on(Experiment::ABILITY_CHECK) {
         pipeline.add_processor(Box::new(ExitStateAnalysisProcessor {}));
         pipeline.add_processor(Box::new(AbilityProcessor {}));
+    }
+
+    // --- Lint checks: run before optimizations and after correctness checks
+    if options.experiment_on(Experiment::LINT_CHECKS) {
+        // Some lint checks need live variable analysis.
+        pipeline.add_processor(Box::new(LiveVarAnalysisProcessor::new(false)));
+        pipeline.add_processor(Box::new(LintProcessor {}));
     }
 
     // --- Optimizations
@@ -438,11 +462,21 @@ pub fn bytecode_pipeline(env: &GlobalEnv) -> FunctionTargetPipeline {
     // While this section of the pipeline is optional, some code that used to previously compile
     // may no longer compile without this section because of using too many local (temp) variables.
 
+    if options.experiment_on(Experiment::CFG_SIMPLIFICATION) {
+        pipeline.add_processor(Box::new(ControlFlowGraphSimplifier {}));
+        if options.experiment_on(Experiment::SPLIT_CRITICAL_EDGES) {
+            // Currently, CFG simplification can again introduce critical edges, so
+            // remove them. Notice that absence of critical edges is (theoretical) relevant
+            // for the livevar processor, which is used frequently below.
+            pipeline.add_processor(Box::new(SplitCriticalEdgesProcessor {}));
+        }
+    }
+
     if options.experiment_on(Experiment::DEAD_CODE_ELIMINATION) {
         pipeline.add_processor(Box::new(UnreachableCodeProcessor {}));
         pipeline.add_processor(Box::new(UnreachableCodeRemover {}));
         pipeline.add_processor(Box::new(LiveVarAnalysisProcessor::new(true)));
-        pipeline.add_processor(Box::new(DeadStoreElimination {}));
+        pipeline.add_processor(Box::new(DeadStoreElimination::new(true)));
     }
 
     if options.experiment_on(Experiment::VARIABLE_COALESCING) {
@@ -461,12 +495,19 @@ pub fn bytecode_pipeline(env: &GlobalEnv) -> FunctionTargetPipeline {
 
     if options.experiment_on(Experiment::DEAD_CODE_ELIMINATION) {
         pipeline.add_processor(Box::new(LiveVarAnalysisProcessor::new(true)));
-        pipeline.add_processor(Box::new(DeadStoreElimination {}));
+        pipeline.add_processor(Box::new(DeadStoreElimination::new(false)));
     }
 
     // Run live var analysis again because it could be invalidated by previous pipeline steps,
     // but it is needed by file format generator.
-    pipeline.add_processor(Box::new(LiveVarAnalysisProcessor::new(false)));
+    // There should be no "transforming" processors run after this point.
+    pipeline.add_processor(Box::new(LiveVarAnalysisProcessor::new(true)));
+
+    if options.experiment_on(Experiment::FLUSH_WRITES_OPTIMIZATION) {
+        // This processor only adds annotations, does not transform the bytecode.
+        pipeline.add_processor(Box::new(FlushWritesProcessor {}));
+    }
+
     pipeline
 }
 
@@ -488,31 +529,101 @@ pub fn disassemble_compiled_units(units: &[CompiledUnit]) -> anyhow::Result<Stri
 
 /// Run the bytecode verifier on the given compiled units and add any diagnostics to the global env.
 pub fn run_bytecode_verifier(units: &[AnnotatedCompiledUnit], env: &mut GlobalEnv) -> bool {
-    let diags = verify_units(units);
-    if !diags.is_empty() {
-        add_move_lang_diagnostics(env, diags);
-        false
+    let mut errors = false;
+    for unit in units {
+        match unit {
+            AnnotatedCompiledUnit::Module(AnnotatedCompiledModule {
+                loc,
+                named_module:
+                    NamedCompiledModule {
+                        module, source_map, ..
+                    },
+                ..
+            }) => {
+                if let Err(e) = move_bytecode_verifier::verify_module(module) {
+                    report_bytecode_verification_error(env, loc, source_map, &e);
+                    errors = true
+                }
+            },
+            AnnotatedCompiledUnit::Script(AnnotatedCompiledScript {
+                loc,
+                named_script:
+                    NamedCompiledScript {
+                        script, source_map, ..
+                    },
+                ..
+            }) => {
+                if let Err(e) = move_bytecode_verifier::verify_script(script) {
+                    report_bytecode_verification_error(env, loc, source_map, &e);
+                    errors = true
+                }
+            },
+        }
+    }
+    !errors
+}
+
+fn report_bytecode_verification_error(
+    env: &GlobalEnv,
+    module_ir_loc: &MoveIrLoc,
+    source_map: &SourceMap,
+    e: &VMError,
+) {
+    let mut precise_loc = true;
+    let loc = &get_vm_error_loc(env, source_map, e).unwrap_or_else(|| {
+        precise_loc = false;
+        env.to_loc(module_ir_loc)
+    });
+    if e.status_type() != StatusType::Verification {
+        env.diag(
+            Severity::Bug,
+            loc,
+            &format!(
+                "unexpected error returned from bytecode verification. This is a compiler bug, consider reporting it.\n{:#?}",
+                e
+            ),
+        )
     } else {
-        true
+        let debug_info = if command_line::get_move_compiler_backtrace_from_env() {
+            format!("\n{:#?}", e)
+        } else {
+            format!(
+                "\nError message: {}",
+                e.message().cloned().unwrap_or_else(|| "none".to_string())
+            )
+        };
+        env.diag(
+            Severity::Bug,
+            loc,
+            &format!(
+                "bytecode verification failed with \
+                unexpected status code `{:?}`. This is a compiler bug, consider reporting it.{}",
+                e.major_status(),
+                debug_info
+            ),
+        )
     }
 }
 
+/// Gets the location associated with the VM error, if available.
+fn get_vm_error_loc(env: &GlobalEnv, source_map: &SourceMap, e: &VMError) -> Option<Loc> {
+    e.offsets().first().and_then(|(fdef_idx, offset)| {
+        source_map
+            .get_code_location(*fdef_idx, *offset)
+            .ok()
+            .map(|l| env.to_loc(&l))
+    })
+}
+
 /// Report any diags in the env to the writer and fail if there are errors.
-pub fn check_errors<W>(
-    env: &GlobalEnv,
-    error_writer: &mut W,
-    msg: &'static str,
-) -> anyhow::Result<()>
+pub fn check_errors<E>(env: &GlobalEnv, emitter: &mut E, msg: &str) -> anyhow::Result<()>
 where
-    W: WriteColor + Write,
+    E: Emitter + ?Sized,
 {
     let options = env.get_extension::<Options>().unwrap_or_default();
-    env.report_diag(error_writer, options.report_severity());
-    if env.has_errors() {
-        bail!("exiting with {}", msg);
-    } else {
-        Ok(())
-    }
+
+    emitter.report_diag(env, options.report_severity());
+    emitter.check_diag(env, options.report_severity(), msg)
 }
 
 /// Annotate the given compiled units.

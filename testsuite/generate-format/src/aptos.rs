@@ -14,11 +14,9 @@ use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::{
     block_metadata_ext::BlockMetadataExt,
     contract_event, event,
-    state_store::{
-        state_key::StateKey,
-        state_value::{PersistedStateValueMetadata, StateValueMetadata},
-    },
+    state_store::{state_key::StateKey, state_value::PersistedStateValueMetadata},
     transaction,
+    transaction::block_epilogue::BlockEpiloguePayload,
     validator_txn::ValidatorTransaction,
     write_set,
 };
@@ -89,19 +87,19 @@ pub fn get_registry() -> Result<Registry> {
     // 1. Record samples for types with custom deserializers.
     trace_crypto_values(&mut tracer, &mut samples)?;
     tracer.trace_value(&mut samples, &event::EventKey::random())?;
-    tracer.trace_value(&mut samples, &write_set::WriteOp::Deletion {
-        metadata: StateValueMetadata::none(),
-    })?;
+    tracer.trace_value(&mut samples, &write_set::WriteOp::legacy_deletion())?;
 
     // 2. Trace the main entry point(s) + every enum separately.
     tracer.trace_type::<contract_event::ContractEvent>(&samples)?;
     tracer.trace_type::<language_storage::TypeTag>(&samples)?;
     tracer.trace_type::<ValidatorTransaction>(&samples)?;
     tracer.trace_type::<BlockMetadataExt>(&samples)?;
+    tracer.trace_type::<BlockEpiloguePayload>(&samples)?;
     tracer.trace_type::<transaction::Transaction>(&samples)?;
     tracer.trace_type::<transaction::TransactionArgument>(&samples)?;
     tracer.trace_type::<transaction::TransactionPayload>(&samples)?;
     tracer.trace_type::<transaction::WriteSetPayload>(&samples)?;
+    tracer.trace_type::<transaction::BlockEpiloguePayload>(&samples)?;
     tracer.trace_type::<StateKey>(&samples)?;
     tracer.trace_type::<PersistedStateValueMetadata>(&samples)?;
 

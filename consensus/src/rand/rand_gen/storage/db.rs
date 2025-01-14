@@ -16,7 +16,7 @@ use crate::{
 };
 use anyhow::Result;
 use aptos_logger::info;
-use aptos_schemadb::{schema::Schema, Options, ReadOptions, SchemaBatch, DB};
+use aptos_schemadb::{batch::SchemaBatch, schema::Schema, Options, DB};
 use std::{path::Path, sync::Arc, time::Instant};
 
 pub struct RandDb {
@@ -58,20 +58,20 @@ impl RandDb {
     }
 
     fn put<S: Schema>(&self, key: &S::Key, value: &S::Value) -> Result<(), DbError> {
-        let batch = SchemaBatch::new();
+        let mut batch = SchemaBatch::new();
         batch.put::<S>(key, value)?;
         self.commit(batch)?;
         Ok(())
     }
 
     fn delete<S: Schema>(&self, mut keys: impl Iterator<Item = S::Key>) -> Result<(), DbError> {
-        let batch = SchemaBatch::new();
+        let mut batch = SchemaBatch::new();
         keys.try_for_each(|key| batch.delete::<S>(&key))?;
         self.commit(batch)
     }
 
     fn get_all<S: Schema>(&self) -> Result<Vec<(S::Key, S::Value)>, DbError> {
-        let mut iter = self.db.iter::<S>(ReadOptions::default())?;
+        let mut iter = self.db.iter::<S>()?;
         iter.seek_to_first();
         Ok(iter
             .filter_map(|e| match e {

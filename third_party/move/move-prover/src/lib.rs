@@ -15,8 +15,8 @@ use move_compiler_v2::{env_pipeline::rewrite_target::RewritingScope, Experiment}
 use move_docgen::Docgen;
 use move_errmapgen::ErrmapGen;
 use move_model::{
-    code_writer::CodeWriter, model::GlobalEnv, parse_addresses_from_options,
-    run_model_builder_with_options,
+    code_writer::CodeWriter, metadata::LATEST_STABLE_COMPILER_VERSION_VALUE, model::GlobalEnv,
+    parse_addresses_from_options, run_model_builder_with_options,
 };
 use move_prover_boogie_backend::{
     add_prelude, boogie_wrapper::BoogieWrapper, bytecode_translator::BoogieTranslator,
@@ -38,7 +38,7 @@ pub mod cli;
 
 pub fn run_move_prover_errors_to_stderr(options: Options) -> anyhow::Result<()> {
     let mut error_writer = StandardStream::stderr(ColorChoice::Auto);
-    run_move_prover(&mut error_writer, options)
+    run_move_prover_v2(&mut error_writer, options)
 }
 
 pub fn run_move_prover<W: WriteColor>(
@@ -53,6 +53,7 @@ pub fn run_move_prover<W: WriteColor>(
             paths: options.move_sources.clone(),
             named_address_map: addrs.clone(),
         }],
+        vec![],
         vec![PackagePaths {
             name: None,
             paths: options.move_deps.clone(),
@@ -70,26 +71,37 @@ pub fn run_move_prover_v2<W: WriteColor>(
     options: Options,
 ) -> anyhow::Result<()> {
     let now = Instant::now();
-    let cloned_options = options.clone();
+    let mut env = create_move_prover_v2_model(error_writer, options.clone())?;
+    run_move_prover_with_model_v2(&mut env, error_writer, options, now)
+}
+
+pub fn create_move_prover_v2_model<W: WriteColor>(
+    error_writer: &mut W,
+    options: Options,
+) -> anyhow::Result<GlobalEnv> {
     let compiler_options = move_compiler_v2::Options {
-        dependencies: cloned_options.move_deps,
-        named_address_mapping: cloned_options.move_named_address_values,
-        output_dir: cloned_options.output_path,
-        language_version: cloned_options.language_version,
+        dependencies: options.move_deps,
+        named_address_mapping: options.move_named_address_values,
+        output_dir: options.output_path,
+        language_version: options.language_version,
+        compiler_version: Some(LATEST_STABLE_COMPILER_VERSION_VALUE),
         skip_attribute_checks: true,
         known_attributes: Default::default(),
-        testing: cloned_options.backend.stable_test_output,
+        testing: options.backend.stable_test_output,
         experiments: vec![],
         experiment_cache: Default::default(),
-        sources: cloned_options.move_sources,
+        sources: options.move_sources,
+        sources_deps: vec![],
+        warn_deprecated: false,
+        warn_of_deprecation_use_in_aptos_libs: false,
         warn_unused: false,
         whole_program: false,
         compile_test_code: false,
-    }
-    .set_experiment(Experiment::UNUSED_STRUCT_PARAMS_CHECK, false);
+        compile_verify_code: true,
+        external_checks: vec![],
+    };
 
-    let mut env = move_compiler_v2::run_move_compiler_for_analysis(error_writer, compiler_options)?;
-    run_move_prover_with_model_v2(&mut env, error_writer, options, now)
+    move_compiler_v2::run_move_compiler_for_analysis(error_writer, compiler_options)
 }
 
 /// Create the initial number operation state for each function and struct
@@ -120,8 +132,7 @@ pub fn run_move_prover_with_model<W: WriteColor>(
     // Run the compiler v2 checking and rewriting pipeline
     let compiler_options = move_compiler_v2::Options::default()
         .set_experiment(Experiment::OPTIMIZE, false)
-        .set_experiment(Experiment::SPEC_REWRITE, true)
-        .set_experiment(Experiment::UNUSED_STRUCT_PARAMS_CHECK, false);
+        .set_experiment(Experiment::SPEC_REWRITE, true);
     env.set_extension(compiler_options.clone());
     let pipeline = move_compiler_v2::check_and_rewrite_pipeline(
         &compiler_options,
@@ -138,8 +149,6 @@ pub fn run_move_prover_with_model_v2<W: WriteColor>(
     options: Options,
     start_time: Instant,
 ) -> anyhow::Result<()> {
-    debug!("global env before prover run:\n{}", env.dump_env_all());
-
     let build_duration = start_time.elapsed();
     check_errors(
         env,
@@ -147,7 +156,6 @@ pub fn run_move_prover_with_model_v2<W: WriteColor>(
         error_writer,
         "exiting with model building errors",
     )?;
-    env.report_diag(error_writer, options.prover.report_severity);
 
     // Add the prover options as an extension to the environment, so they can be accessed
     // from there.
@@ -317,6 +325,7 @@ pub fn create_and_process_bytecode(options: &Options, env: &GlobalEnv) -> Functi
             &dump_file_base,
             options.prover.dump_cfg,
             &|_| {},
+            || true,
         )
     } else {
         pipeline.run(env, &mut targets);

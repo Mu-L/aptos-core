@@ -109,7 +109,7 @@ pub enum EntryFunctionCall {
     /// Here is an example attack if we don't ask for the second signature `cap_update_table`:
     /// Alice has rotated her account `addr_a` to `new_addr_a`. As a result, the following entry is created, to help Alice when recovering her wallet:
     /// `OriginatingAddress[new_addr_a]` -> `addr_a`
-    /// Alice has had bad day: her laptop blew up and she needs to reset her account on a new one.
+    /// Alice has had a bad day: her laptop blew up and she needs to reset her account on a new one.
     /// (Fortunately, she still has her secret key `new_sk_a` associated with her new address `new_addr_a`, so she can do this.)
     ///
     /// But Bob likes to mess with Alice.
@@ -136,6 +136,9 @@ pub enum EntryFunctionCall {
     /// does not come with a proof-of-knowledge of the underlying SK. Nonetheless, we need this functionality due to
     /// the introduction of non-standard key algorithms, such as passkeys, which cannot produce proofs-of-knowledge in
     /// the format expected in `rotate_authentication_key`.
+    ///
+    /// If you'd like to followup with updating the `OriginatingAddress` table, you can call
+    /// `set_originating_address()`.
     AccountRotateAuthenticationKeyCall {
         new_auth_key: Vec<u8>,
     },
@@ -146,6 +149,21 @@ pub enum EntryFunctionCall {
         new_public_key_bytes: Vec<u8>,
         cap_update_table: Vec<u8>,
     },
+
+    /// For the given account, add an entry to `OriginatingAddress` table mapping the account's
+    /// authentication key to the account's address.
+    ///
+    /// Can be used as a followup to `rotate_authentication_key_call()` to reconcile the
+    /// `OriginatingAddress` table, or to establish a mapping for a new account that has not yet had
+    /// its authentication key rotated.
+    ///
+    /// Aborts if there is already an entry in the `OriginatingAddress` table for the account's
+    /// authentication key.
+    ///
+    /// Kept as a private entry function to ensure that after an unproven rotation via
+    /// `rotate_authentication_key_call()`, the `OriginatingAddress` table is only updated under the
+    /// authority of the new authentication key.
+    AccountSetOriginatingAddress {},
 
     /// Batch version of APT transfer.
     AptosAccountBatchTransfer {
@@ -163,6 +181,17 @@ pub enum EntryFunctionCall {
     /// Basic account creation methods.
     AptosAccountCreateAccount {
         auth_key: AccountAddress,
+    },
+
+    /// APT Primary Fungible Store specific specialized functions,
+    /// Utilized internally once migration of APT to FungibleAsset is complete.
+    /// Convenient function to transfer APT to a recipient account that might not exist.
+    /// This would create the recipient APT PFS first, which also registers it to receive APT, before transferring.
+    /// TODO: once migration is complete, rename to just "transfer_only" and make it an entry function (for cheapest way
+    /// to transfer APT) - if we want to allow APT PFS without account itself
+    AptosAccountFungibleTransferOnly {
+        to: AccountAddress,
+        amount: u64,
     },
 
     /// Set whether `account` can receive direct transfers of coins that they have not explicitly registered to receive.
@@ -204,6 +233,21 @@ pub enum EntryFunctionCall {
 
     AptosGovernanceAddApprovedScriptHashScript {
         proposal_id: u64,
+    },
+
+    /// Batch vote on proposal with proposal_id and specified voting power from multiple stake_pools.
+    AptosGovernanceBatchPartialVote {
+        stake_pools: Vec<AccountAddress>,
+        proposal_id: u64,
+        voting_power: u64,
+        should_pass: bool,
+    },
+
+    /// Vote on proposal with proposal_id and all voting power from multiple stake_pools.
+    AptosGovernanceBatchVote {
+        stake_pools: Vec<AccountAddress>,
+        proposal_id: u64,
+        should_pass: bool,
     },
 
     /// Create a single-step proposal with the backing `stake_pool`.
@@ -270,6 +314,24 @@ pub enum EntryFunctionCall {
     CodePublishPackageTxn {
         metadata_serialized: Vec<u8>,
         code: Vec<Vec<u8>>,
+    },
+
+    CoinCreateCoinConversionMap {},
+
+    /// Create APT pairing by passing `AptosCoin`.
+    CoinCreatePairing {
+        coin_type: TypeTag,
+    },
+
+    /// Migrate to fungible store for `CoinType` if not yet.
+    CoinMigrateCoinStoreToFungibleStore {
+        coin_type: TypeTag,
+        accounts: Vec<AccountAddress>,
+    },
+
+    /// Voluntarily migrate to fungible store for `CoinType` if not yet.
+    CoinMigrateToFungibleStore {
+        coin_type: TypeTag,
     },
 
     /// Transfers `amount` of coins `CoinType` from `from` to `to`.
@@ -405,10 +467,76 @@ pub enum EntryFunctionCall {
         amount: u64,
     },
 
+    /// This can be called to install or update a set of JWKs for a federated OIDC provider.  This function should
+    /// be invoked to intially install a set of JWKs or to update a set of JWKs when a keypair is rotated.
+    ///
+    /// The `iss` parameter is the value of the `iss` claim on the JWTs that are to be verified by the JWK set.
+    /// `kid_vec`, `alg_vec`, `e_vec`, `n_vec` are String vectors of the JWK attributes `kid`, `alg`, `e` and `n` respectively.
+    /// See https://datatracker.ietf.org/doc/html/rfc7517#section-4 for more details about the JWK attributes aforementioned.
+    ///
+    /// For the example JWK set snapshot below containing 2 keys for Google found at https://www.googleapis.com/oauth2/v3/certs -
+    /// ```json
+    /// {
+    ///   "keys": [
+    ///     {
+    ///       "alg": "RS256",
+    ///       "use": "sig",
+    ///       "kty": "RSA",
+    ///       "n": "wNHgGSG5B5xOEQNFPW2p_6ZxZbfPoAU5VceBUuNwQWLop0ohW0vpoZLU1tAsq_S9s5iwy27rJw4EZAOGBR9oTRq1Y6Li5pDVJfmzyRNtmWCWndR-bPqhs_dkJU7MbGwcvfLsN9FSHESFrS9sfGtUX-lZfLoGux23TKdYV9EE-H-NDASxrVFUk2GWc3rL6UEMWrMnOqV9-tghybDU3fcRdNTDuXUr9qDYmhmNegYjYu4REGjqeSyIG1tuQxYpOBH-tohtcfGY-oRTS09kgsSS9Q5BRM4qqCkGP28WhlSf4ui0-norS0gKMMI1P_ZAGEsLn9p2TlYMpewvIuhjJs1thw",
+    ///       "kid": "d7b939771a7800c413f90051012d975981916d71",
+    ///       "e": "AQAB"
+    ///     },
+    ///     {
+    ///       "kty": "RSA",
+    ///       "kid": "b2620d5e7f132b52afe8875cdf3776c064249d04",
+    ///       "alg": "RS256",
+    ///       "n": "pi22xDdK2fz5gclIbDIGghLDYiRO56eW2GUcboeVlhbAuhuT5mlEYIevkxdPOg5n6qICePZiQSxkwcYMIZyLkZhSJ2d2M6Szx2gDtnAmee6o_tWdroKu0DjqwG8pZU693oLaIjLku3IK20lTs6-2TeH-pUYMjEqiFMhn-hb7wnvH_FuPTjgz9i0rEdw_Hf3Wk6CMypaUHi31y6twrMWq1jEbdQNl50EwH-RQmQ9bs3Wm9V9t-2-_Jzg3AT0Ny4zEDU7WXgN2DevM8_FVje4IgztNy29XUkeUctHsr-431_Iu23JIy6U4Kxn36X3RlVUKEkOMpkDD3kd81JPW4Ger_w",
+    ///       "e": "AQAB",
+    ///       "use": "sig"
+    ///     }
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// We can call update_federated_jwk_set for Google's `iss` - "https://accounts.google.com" and for each vector
+    /// argument `kid_vec`, `alg_vec`, `e_vec`, `n_vec`, we set in index 0 the corresponding attribute in the first JWK and we set in index 1 the
+    /// the corresponding attribute in the second JWK as shown below.
+    ///
+    /// ```move
+    /// use std::string::utf8;
+    /// aptos_framework::jwks::update_federated_jwk_set(
+    ///     jwk_owner,
+    ///     b"https://accounts.google.com",
+    ///     vector[utf8(b"d7b939771a7800c413f90051012d975981916d71"), utf8(b"b2620d5e7f132b52afe8875cdf3776c064249d04")],
+    ///     vector[utf8(b"RS256"), utf8(b"RS256")],
+    ///     vector[utf8(b"AQAB"), utf8(b"AQAB")],
+    ///     vector[
+    ///         utf8(b"wNHgGSG5B5xOEQNFPW2p_6ZxZbfPoAU5VceBUuNwQWLop0ohW0vpoZLU1tAsq_S9s5iwy27rJw4EZAOGBR9oTRq1Y6Li5pDVJfmzyRNtmWCWndR-bPqhs_dkJU7MbGwcvfLsN9FSHESFrS9sfGtUX-lZfLoGux23TKdYV9EE-H-NDASxrVFUk2GWc3rL6UEMWrMnOqV9-tghybDU3fcRdNTDuXUr9qDYmhmNegYjYu4REGjqeSyIG1tuQxYpOBH-tohtcfGY-oRTS09kgsSS9Q5BRM4qqCkGP28WhlSf4ui0-norS0gKMMI1P_ZAGEsLn9p2TlYMpewvIuhjJs1thw"),
+    ///         utf8(b"pi22xDdK2fz5gclIbDIGghLDYiRO56eW2GUcboeVlhbAuhuT5mlEYIevkxdPOg5n6qICePZiQSxkwcYMIZyLkZhSJ2d2M6Szx2gDtnAmee6o_tWdroKu0DjqwG8pZU693oLaIjLku3IK20lTs6-2TeH-pUYMjEqiFMhn-hb7wnvH_FuPTjgz9i0rEdw_Hf3Wk6CMypaUHi31y6twrMWq1jEbdQNl50EwH-RQmQ9bs3Wm9V9t-2-_Jzg3AT0Ny4zEDU7WXgN2DevM8_FVje4IgztNy29XUkeUctHsr-431_Iu23JIy6U4Kxn36X3RlVUKEkOMpkDD3kd81JPW4Ger_w")
+    ///     ]
+    /// )
+    /// ```
+    ///
+    /// See AIP-96 for more details about federated keyless - https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-96.md
+    ///
+    /// NOTE: Currently only RSA keys are supported.
+    JwksUpdateFederatedJwkSet {
+        iss: Vec<u8>,
+        kid_vec: Vec<Vec<u8>>,
+        alg_vec: Vec<Vec<u8>>,
+        e_vec: Vec<Vec<u8>>,
+        n_vec: Vec<Vec<u8>>,
+    },
+
     /// Withdraw an `amount` of coin `CoinType` from `account` and burn it.
     ManagedCoinBurn {
         coin_type: TypeTag,
         amount: u64,
+    },
+
+    /// Destroys capabilities from the account, so that the user no longer has access to mint or burn.
+    ManagedCoinDestroyCaps {
+        coin_type: TypeTag,
     },
 
     /// Initialize new coin `CoinType` in Aptos Blockchain.
@@ -514,6 +642,33 @@ pub enum EntryFunctionCall {
         account_scheme: u8,
         account_public_key: Vec<u8>,
         create_multisig_account_signed_message: Vec<u8>,
+        metadata_keys: Vec<Vec<u8>>,
+        metadata_values: Vec<Vec<u8>>,
+    },
+
+    /// Private entry function that creates a new multisig account on top of an existing account and immediately rotate
+    /// the origin auth key to 0x0.
+    ///
+    /// Note: If the original account is a resource account, this does not revoke all control over it as if any
+    /// SignerCapability of the resource account still exists, it can still be used to generate the signer for the
+    /// account.
+    MultisigAccountCreateWithExistingAccountAndRevokeAuthKeyCall {
+        owners: Vec<AccountAddress>,
+        num_signatures_required: u64,
+        metadata_keys: Vec<Vec<u8>>,
+        metadata_values: Vec<Vec<u8>>,
+    },
+
+    /// Private entry function that creates a new multisig account on top of an existing account.
+    ///
+    /// This offers a migration path for an existing account with any type of auth key.
+    ///
+    /// Note that this does not revoke auth key-based control over the account. Owners should separately rotate the auth
+    /// key after they are fully migrated to the new multisig account. Alternatively, they can call
+    /// create_with_existing_account_and_revoke_auth_key_call instead.
+    MultisigAccountCreateWithExistingAccountCall {
+        owners: Vec<AccountAddress>,
+        num_signatures_required: u64,
         metadata_keys: Vec<Vec<u8>>,
         metadata_values: Vec<Vec<u8>>,
     },
@@ -881,6 +1036,8 @@ pub enum EntryFunctionCall {
         new_voter: AccountAddress,
     },
 
+    TransactionFeeConvertToAptosFaBurnRef {},
+
     /// Used in on-chain governances to update the major version for the next epoch.
     /// Example usage:
     /// - `aptos_framework::version::set_for_next_epoch(&framework_signer, new_version);`
@@ -1058,6 +1215,7 @@ impl EntryFunctionCall {
                 new_public_key_bytes,
                 cap_update_table,
             ),
+            AccountSetOriginatingAddress {} => account_set_originating_address(),
             AptosAccountBatchTransfer {
                 recipients,
                 amounts,
@@ -1068,6 +1226,9 @@ impl EntryFunctionCall {
                 amounts,
             } => aptos_account_batch_transfer_coins(coin_type, recipients, amounts),
             AptosAccountCreateAccount { auth_key } => aptos_account_create_account(auth_key),
+            AptosAccountFungibleTransferOnly { to, amount } => {
+                aptos_account_fungible_transfer_only(to, amount)
+            },
             AptosAccountSetAllowDirectCoinTransfers { allow } => {
                 aptos_account_set_allow_direct_coin_transfers(allow)
             },
@@ -1083,6 +1244,22 @@ impl EntryFunctionCall {
             AptosGovernanceAddApprovedScriptHashScript { proposal_id } => {
                 aptos_governance_add_approved_script_hash_script(proposal_id)
             },
+            AptosGovernanceBatchPartialVote {
+                stake_pools,
+                proposal_id,
+                voting_power,
+                should_pass,
+            } => aptos_governance_batch_partial_vote(
+                stake_pools,
+                proposal_id,
+                voting_power,
+                should_pass,
+            ),
+            AptosGovernanceBatchVote {
+                stake_pools,
+                proposal_id,
+                should_pass,
+            } => aptos_governance_batch_vote(stake_pools, proposal_id, should_pass),
             AptosGovernanceCreateProposal {
                 stake_pool,
                 execution_hash,
@@ -1125,6 +1302,13 @@ impl EntryFunctionCall {
                 metadata_serialized,
                 code,
             } => code_publish_package_txn(metadata_serialized, code),
+            CoinCreateCoinConversionMap {} => coin_create_coin_conversion_map(),
+            CoinCreatePairing { coin_type } => coin_create_pairing(coin_type),
+            CoinMigrateCoinStoreToFungibleStore {
+                coin_type,
+                accounts,
+            } => coin_migrate_coin_store_to_fungible_store(coin_type, accounts),
+            CoinMigrateToFungibleStore { coin_type } => coin_migrate_to_fungible_store(coin_type),
             CoinTransfer {
                 coin_type,
                 to,
@@ -1210,7 +1394,15 @@ impl EntryFunctionCall {
                 pool_address,
                 amount,
             } => delegation_pool_withdraw(pool_address, amount),
+            JwksUpdateFederatedJwkSet {
+                iss,
+                kid_vec,
+                alg_vec,
+                e_vec,
+                n_vec,
+            } => jwks_update_federated_jwk_set(iss, kid_vec, alg_vec, e_vec, n_vec),
             ManagedCoinBurn { coin_type, amount } => managed_coin_burn(coin_type, amount),
+            ManagedCoinDestroyCaps { coin_type } => managed_coin_destroy_caps(coin_type),
             ManagedCoinInitialize {
                 coin_type,
                 name,
@@ -1285,6 +1477,28 @@ impl EntryFunctionCall {
                 account_scheme,
                 account_public_key,
                 create_multisig_account_signed_message,
+                metadata_keys,
+                metadata_values,
+            ),
+            MultisigAccountCreateWithExistingAccountAndRevokeAuthKeyCall {
+                owners,
+                num_signatures_required,
+                metadata_keys,
+                metadata_values,
+            } => multisig_account_create_with_existing_account_and_revoke_auth_key_call(
+                owners,
+                num_signatures_required,
+                metadata_keys,
+                metadata_values,
+            ),
+            MultisigAccountCreateWithExistingAccountCall {
+                owners,
+                num_signatures_required,
+                metadata_keys,
+                metadata_values,
+            } => multisig_account_create_with_existing_account_call(
+                owners,
+                num_signatures_required,
                 metadata_keys,
                 metadata_values,
             ),
@@ -1523,6 +1737,9 @@ impl EntryFunctionCall {
                 operator,
                 new_voter,
             } => staking_proxy_set_voter(operator, new_voter),
+            TransactionFeeConvertToAptosFaBurnRef {} => {
+                transaction_fee_convert_to_aptos_fa_burn_ref()
+            },
             VersionSetForNextEpoch { major } => version_set_for_next_epoch(major),
             VersionSetVersion { major } => version_set_version(major),
             VestingAdminWithdraw { contract_address } => vesting_admin_withdraw(contract_address),
@@ -1758,7 +1975,7 @@ pub fn account_revoke_signer_capability(
 /// Here is an example attack if we don't ask for the second signature `cap_update_table`:
 /// Alice has rotated her account `addr_a` to `new_addr_a`. As a result, the following entry is created, to help Alice when recovering her wallet:
 /// `OriginatingAddress[new_addr_a]` -> `addr_a`
-/// Alice has had bad day: her laptop blew up and she needs to reset her account on a new one.
+/// Alice has had a bad day: her laptop blew up and she needs to reset her account on a new one.
 /// (Fortunately, she still has her secret key `new_sk_a` associated with her new address `new_addr_a`, so she can do this.)
 ///
 /// But Bob likes to mess with Alice.
@@ -1805,6 +2022,9 @@ pub fn account_rotate_authentication_key(
 /// does not come with a proof-of-knowledge of the underlying SK. Nonetheless, we need this functionality due to
 /// the introduction of non-standard key algorithms, such as passkeys, which cannot produce proofs-of-knowledge in
 /// the format expected in `rotate_authentication_key`.
+///
+/// If you'd like to followup with updating the `OriginatingAddress` table, you can call
+/// `set_originating_address()`.
 pub fn account_rotate_authentication_key_call(new_auth_key: Vec<u8>) -> TransactionPayload {
     TransactionPayload::EntryFunction(EntryFunction::new(
         ModuleId::new(
@@ -1842,6 +2062,34 @@ pub fn account_rotate_authentication_key_with_rotation_capability(
             bcs::to_bytes(&new_public_key_bytes).unwrap(),
             bcs::to_bytes(&cap_update_table).unwrap(),
         ],
+    ))
+}
+
+/// For the given account, add an entry to `OriginatingAddress` table mapping the account's
+/// authentication key to the account's address.
+///
+/// Can be used as a followup to `rotate_authentication_key_call()` to reconcile the
+/// `OriginatingAddress` table, or to establish a mapping for a new account that has not yet had
+/// its authentication key rotated.
+///
+/// Aborts if there is already an entry in the `OriginatingAddress` table for the account's
+/// authentication key.
+///
+/// Kept as a private entry function to ensure that after an unproven rotation via
+/// `rotate_authentication_key_call()`, the `OriginatingAddress` table is only updated under the
+/// authority of the new authentication key.
+pub fn account_set_originating_address() -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("account").to_owned(),
+        ),
+        ident_str!("set_originating_address").to_owned(),
+        vec![],
+        vec![],
     ))
 }
 
@@ -1903,6 +2151,27 @@ pub fn aptos_account_create_account(auth_key: AccountAddress) -> TransactionPayl
         ident_str!("create_account").to_owned(),
         vec![],
         vec![bcs::to_bytes(&auth_key).unwrap()],
+    ))
+}
+
+/// APT Primary Fungible Store specific specialized functions,
+/// Utilized internally once migration of APT to FungibleAsset is complete.
+/// Convenient function to transfer APT to a recipient account that might not exist.
+/// This would create the recipient APT PFS first, which also registers it to receive APT, before transferring.
+/// TODO: once migration is complete, rename to just "transfer_only" and make it an entry function (for cheapest way
+/// to transfer APT) - if we want to allow APT PFS without account itself
+pub fn aptos_account_fungible_transfer_only(to: AccountAddress, amount: u64) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("aptos_account").to_owned(),
+        ),
+        ident_str!("fungible_transfer_only").to_owned(),
+        vec![],
+        vec![bcs::to_bytes(&to).unwrap(), bcs::to_bytes(&amount).unwrap()],
     ))
 }
 
@@ -2026,6 +2295,56 @@ pub fn aptos_governance_add_approved_script_hash_script(proposal_id: u64) -> Tra
         ident_str!("add_approved_script_hash_script").to_owned(),
         vec![],
         vec![bcs::to_bytes(&proposal_id).unwrap()],
+    ))
+}
+
+/// Batch vote on proposal with proposal_id and specified voting power from multiple stake_pools.
+pub fn aptos_governance_batch_partial_vote(
+    stake_pools: Vec<AccountAddress>,
+    proposal_id: u64,
+    voting_power: u64,
+    should_pass: bool,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("aptos_governance").to_owned(),
+        ),
+        ident_str!("batch_partial_vote").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&stake_pools).unwrap(),
+            bcs::to_bytes(&proposal_id).unwrap(),
+            bcs::to_bytes(&voting_power).unwrap(),
+            bcs::to_bytes(&should_pass).unwrap(),
+        ],
+    ))
+}
+
+/// Vote on proposal with proposal_id and all voting power from multiple stake_pools.
+pub fn aptos_governance_batch_vote(
+    stake_pools: Vec<AccountAddress>,
+    proposal_id: u64,
+    should_pass: bool,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("aptos_governance").to_owned(),
+        ),
+        ident_str!("batch_vote").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&stake_pools).unwrap(),
+            bcs::to_bytes(&proposal_id).unwrap(),
+            bcs::to_bytes(&should_pass).unwrap(),
+        ],
     ))
 }
 
@@ -2219,6 +2538,72 @@ pub fn code_publish_package_txn(
             bcs::to_bytes(&metadata_serialized).unwrap(),
             bcs::to_bytes(&code).unwrap(),
         ],
+    ))
+}
+
+pub fn coin_create_coin_conversion_map() -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("coin").to_owned(),
+        ),
+        ident_str!("create_coin_conversion_map").to_owned(),
+        vec![],
+        vec![],
+    ))
+}
+
+/// Create APT pairing by passing `AptosCoin`.
+pub fn coin_create_pairing(coin_type: TypeTag) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("coin").to_owned(),
+        ),
+        ident_str!("create_pairing").to_owned(),
+        vec![coin_type],
+        vec![],
+    ))
+}
+
+/// Migrate to fungible store for `CoinType` if not yet.
+pub fn coin_migrate_coin_store_to_fungible_store(
+    coin_type: TypeTag,
+    accounts: Vec<AccountAddress>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("coin").to_owned(),
+        ),
+        ident_str!("migrate_coin_store_to_fungible_store").to_owned(),
+        vec![coin_type],
+        vec![bcs::to_bytes(&accounts).unwrap()],
+    ))
+}
+
+/// Voluntarily migrate to fungible store for `CoinType` if not yet.
+pub fn coin_migrate_to_fungible_store(coin_type: TypeTag) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("coin").to_owned(),
+        ),
+        ident_str!("migrate_to_fungible_store").to_owned(),
+        vec![coin_type],
+        vec![],
     ))
 }
 
@@ -2636,6 +3021,86 @@ pub fn delegation_pool_withdraw(pool_address: AccountAddress, amount: u64) -> Tr
     ))
 }
 
+/// This can be called to install or update a set of JWKs for a federated OIDC provider.  This function should
+/// be invoked to intially install a set of JWKs or to update a set of JWKs when a keypair is rotated.
+///
+/// The `iss` parameter is the value of the `iss` claim on the JWTs that are to be verified by the JWK set.
+/// `kid_vec`, `alg_vec`, `e_vec`, `n_vec` are String vectors of the JWK attributes `kid`, `alg`, `e` and `n` respectively.
+/// See https://datatracker.ietf.org/doc/html/rfc7517#section-4 for more details about the JWK attributes aforementioned.
+///
+/// For the example JWK set snapshot below containing 2 keys for Google found at https://www.googleapis.com/oauth2/v3/certs -
+/// ```json
+/// {
+///   "keys": [
+///     {
+///       "alg": "RS256",
+///       "use": "sig",
+///       "kty": "RSA",
+///       "n": "wNHgGSG5B5xOEQNFPW2p_6ZxZbfPoAU5VceBUuNwQWLop0ohW0vpoZLU1tAsq_S9s5iwy27rJw4EZAOGBR9oTRq1Y6Li5pDVJfmzyRNtmWCWndR-bPqhs_dkJU7MbGwcvfLsN9FSHESFrS9sfGtUX-lZfLoGux23TKdYV9EE-H-NDASxrVFUk2GWc3rL6UEMWrMnOqV9-tghybDU3fcRdNTDuXUr9qDYmhmNegYjYu4REGjqeSyIG1tuQxYpOBH-tohtcfGY-oRTS09kgsSS9Q5BRM4qqCkGP28WhlSf4ui0-norS0gKMMI1P_ZAGEsLn9p2TlYMpewvIuhjJs1thw",
+///       "kid": "d7b939771a7800c413f90051012d975981916d71",
+///       "e": "AQAB"
+///     },
+///     {
+///       "kty": "RSA",
+///       "kid": "b2620d5e7f132b52afe8875cdf3776c064249d04",
+///       "alg": "RS256",
+///       "n": "pi22xDdK2fz5gclIbDIGghLDYiRO56eW2GUcboeVlhbAuhuT5mlEYIevkxdPOg5n6qICePZiQSxkwcYMIZyLkZhSJ2d2M6Szx2gDtnAmee6o_tWdroKu0DjqwG8pZU693oLaIjLku3IK20lTs6-2TeH-pUYMjEqiFMhn-hb7wnvH_FuPTjgz9i0rEdw_Hf3Wk6CMypaUHi31y6twrMWq1jEbdQNl50EwH-RQmQ9bs3Wm9V9t-2-_Jzg3AT0Ny4zEDU7WXgN2DevM8_FVje4IgztNy29XUkeUctHsr-431_Iu23JIy6U4Kxn36X3RlVUKEkOMpkDD3kd81JPW4Ger_w",
+///       "e": "AQAB",
+///       "use": "sig"
+///     }
+///   ]
+/// }
+/// ```
+///
+/// We can call update_federated_jwk_set for Google's `iss` - "https://accounts.google.com" and for each vector
+/// argument `kid_vec`, `alg_vec`, `e_vec`, `n_vec`, we set in index 0 the corresponding attribute in the first JWK and we set in index 1 the
+/// the corresponding attribute in the second JWK as shown below.
+///
+/// ```move
+/// use std::string::utf8;
+/// aptos_framework::jwks::update_federated_jwk_set(
+///     jwk_owner,
+///     b"https://accounts.google.com",
+///     vector[utf8(b"d7b939771a7800c413f90051012d975981916d71"), utf8(b"b2620d5e7f132b52afe8875cdf3776c064249d04")],
+///     vector[utf8(b"RS256"), utf8(b"RS256")],
+///     vector[utf8(b"AQAB"), utf8(b"AQAB")],
+///     vector[
+///         utf8(b"wNHgGSG5B5xOEQNFPW2p_6ZxZbfPoAU5VceBUuNwQWLop0ohW0vpoZLU1tAsq_S9s5iwy27rJw4EZAOGBR9oTRq1Y6Li5pDVJfmzyRNtmWCWndR-bPqhs_dkJU7MbGwcvfLsN9FSHESFrS9sfGtUX-lZfLoGux23TKdYV9EE-H-NDASxrVFUk2GWc3rL6UEMWrMnOqV9-tghybDU3fcRdNTDuXUr9qDYmhmNegYjYu4REGjqeSyIG1tuQxYpOBH-tohtcfGY-oRTS09kgsSS9Q5BRM4qqCkGP28WhlSf4ui0-norS0gKMMI1P_ZAGEsLn9p2TlYMpewvIuhjJs1thw"),
+///         utf8(b"pi22xDdK2fz5gclIbDIGghLDYiRO56eW2GUcboeVlhbAuhuT5mlEYIevkxdPOg5n6qICePZiQSxkwcYMIZyLkZhSJ2d2M6Szx2gDtnAmee6o_tWdroKu0DjqwG8pZU693oLaIjLku3IK20lTs6-2TeH-pUYMjEqiFMhn-hb7wnvH_FuPTjgz9i0rEdw_Hf3Wk6CMypaUHi31y6twrMWq1jEbdQNl50EwH-RQmQ9bs3Wm9V9t-2-_Jzg3AT0Ny4zEDU7WXgN2DevM8_FVje4IgztNy29XUkeUctHsr-431_Iu23JIy6U4Kxn36X3RlVUKEkOMpkDD3kd81JPW4Ger_w")
+///     ]
+/// )
+/// ```
+///
+/// See AIP-96 for more details about federated keyless - https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-96.md
+///
+/// NOTE: Currently only RSA keys are supported.
+pub fn jwks_update_federated_jwk_set(
+    iss: Vec<u8>,
+    kid_vec: Vec<Vec<u8>>,
+    alg_vec: Vec<Vec<u8>>,
+    e_vec: Vec<Vec<u8>>,
+    n_vec: Vec<Vec<u8>>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("jwks").to_owned(),
+        ),
+        ident_str!("update_federated_jwk_set").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&iss).unwrap(),
+            bcs::to_bytes(&kid_vec).unwrap(),
+            bcs::to_bytes(&alg_vec).unwrap(),
+            bcs::to_bytes(&e_vec).unwrap(),
+            bcs::to_bytes(&n_vec).unwrap(),
+        ],
+    ))
+}
+
 /// Withdraw an `amount` of coin `CoinType` from `account` and burn it.
 pub fn managed_coin_burn(coin_type: TypeTag, amount: u64) -> TransactionPayload {
     TransactionPayload::EntryFunction(EntryFunction::new(
@@ -2649,6 +3114,22 @@ pub fn managed_coin_burn(coin_type: TypeTag, amount: u64) -> TransactionPayload 
         ident_str!("burn").to_owned(),
         vec![coin_type],
         vec![bcs::to_bytes(&amount).unwrap()],
+    ))
+}
+
+/// Destroys capabilities from the account, so that the user no longer has access to mint or burn.
+pub fn managed_coin_destroy_caps(coin_type: TypeTag) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("managed_coin").to_owned(),
+        ),
+        ident_str!("destroy_caps").to_owned(),
+        vec![coin_type],
+        vec![],
     ))
 }
 
@@ -2945,6 +3426,69 @@ pub fn multisig_account_create_with_existing_account_and_revoke_auth_key(
             bcs::to_bytes(&account_scheme).unwrap(),
             bcs::to_bytes(&account_public_key).unwrap(),
             bcs::to_bytes(&create_multisig_account_signed_message).unwrap(),
+            bcs::to_bytes(&metadata_keys).unwrap(),
+            bcs::to_bytes(&metadata_values).unwrap(),
+        ],
+    ))
+}
+
+/// Private entry function that creates a new multisig account on top of an existing account and immediately rotate
+/// the origin auth key to 0x0.
+///
+/// Note: If the original account is a resource account, this does not revoke all control over it as if any
+/// SignerCapability of the resource account still exists, it can still be used to generate the signer for the
+/// account.
+pub fn multisig_account_create_with_existing_account_and_revoke_auth_key_call(
+    owners: Vec<AccountAddress>,
+    num_signatures_required: u64,
+    metadata_keys: Vec<Vec<u8>>,
+    metadata_values: Vec<Vec<u8>>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("create_with_existing_account_and_revoke_auth_key_call").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&owners).unwrap(),
+            bcs::to_bytes(&num_signatures_required).unwrap(),
+            bcs::to_bytes(&metadata_keys).unwrap(),
+            bcs::to_bytes(&metadata_values).unwrap(),
+        ],
+    ))
+}
+
+/// Private entry function that creates a new multisig account on top of an existing account.
+///
+/// This offers a migration path for an existing account with any type of auth key.
+///
+/// Note that this does not revoke auth key-based control over the account. Owners should separately rotate the auth
+/// key after they are fully migrated to the new multisig account. Alternatively, they can call
+/// create_with_existing_account_and_revoke_auth_key_call instead.
+pub fn multisig_account_create_with_existing_account_call(
+    owners: Vec<AccountAddress>,
+    num_signatures_required: u64,
+    metadata_keys: Vec<Vec<u8>>,
+    metadata_values: Vec<Vec<u8>>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("create_with_existing_account_call").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&owners).unwrap(),
+            bcs::to_bytes(&num_signatures_required).unwrap(),
             bcs::to_bytes(&metadata_keys).unwrap(),
             bcs::to_bytes(&metadata_values).unwrap(),
         ],
@@ -4088,6 +4632,21 @@ pub fn staking_proxy_set_voter(
     ))
 }
 
+pub fn transaction_fee_convert_to_aptos_fa_burn_ref() -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("transaction_fee").to_owned(),
+        ),
+        ident_str!("convert_to_aptos_fa_burn_ref").to_owned(),
+        vec![],
+        vec![],
+    ))
+}
+
 /// Used in on-chain governances to update the major version for the next epoch.
 /// Example usage:
 /// - `aptos_framework::version::set_for_next_epoch(&framework_signer, new_version);`
@@ -4584,6 +5143,16 @@ mod decoder {
         }
     }
 
+    pub fn account_set_originating_address(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(_script) = payload {
+            Some(EntryFunctionCall::AccountSetOriginatingAddress {})
+        } else {
+            None
+        }
+    }
+
     pub fn aptos_account_batch_transfer(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
         if let TransactionPayload::EntryFunction(script) = payload {
             Some(EntryFunctionCall::AptosAccountBatchTransfer {
@@ -4613,6 +5182,19 @@ mod decoder {
         if let TransactionPayload::EntryFunction(script) = payload {
             Some(EntryFunctionCall::AptosAccountCreateAccount {
                 auth_key: bcs::from_bytes(script.args().get(0)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn aptos_account_fungible_transfer_only(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::AptosAccountFungibleTransferOnly {
+                to: bcs::from_bytes(script.args().get(0)?).ok()?,
+                amount: bcs::from_bytes(script.args().get(1)?).ok()?,
             })
         } else {
             None
@@ -4696,6 +5278,33 @@ mod decoder {
                     proposal_id: bcs::from_bytes(script.args().get(0)?).ok()?,
                 },
             )
+        } else {
+            None
+        }
+    }
+
+    pub fn aptos_governance_batch_partial_vote(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::AptosGovernanceBatchPartialVote {
+                stake_pools: bcs::from_bytes(script.args().get(0)?).ok()?,
+                proposal_id: bcs::from_bytes(script.args().get(1)?).ok()?,
+                voting_power: bcs::from_bytes(script.args().get(2)?).ok()?,
+                should_pass: bcs::from_bytes(script.args().get(3)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn aptos_governance_batch_vote(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::AptosGovernanceBatchVote {
+                stake_pools: bcs::from_bytes(script.args().get(0)?).ok()?,
+                proposal_id: bcs::from_bytes(script.args().get(1)?).ok()?,
+                should_pass: bcs::from_bytes(script.args().get(2)?).ok()?,
+            })
         } else {
             None
         }
@@ -4792,6 +5401,51 @@ mod decoder {
             Some(EntryFunctionCall::CodePublishPackageTxn {
                 metadata_serialized: bcs::from_bytes(script.args().get(0)?).ok()?,
                 code: bcs::from_bytes(script.args().get(1)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn coin_create_coin_conversion_map(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(_script) = payload {
+            Some(EntryFunctionCall::CoinCreateCoinConversionMap {})
+        } else {
+            None
+        }
+    }
+
+    pub fn coin_create_pairing(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::CoinCreatePairing {
+                coin_type: script.ty_args().get(0)?.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn coin_migrate_coin_store_to_fungible_store(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::CoinMigrateCoinStoreToFungibleStore {
+                coin_type: script.ty_args().get(0)?.clone(),
+                accounts: bcs::from_bytes(script.args().get(0)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn coin_migrate_to_fungible_store(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::CoinMigrateToFungibleStore {
+                coin_type: script.ty_args().get(0)?.clone(),
             })
         } else {
             None
@@ -5053,11 +5707,37 @@ mod decoder {
         }
     }
 
+    pub fn jwks_update_federated_jwk_set(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::JwksUpdateFederatedJwkSet {
+                iss: bcs::from_bytes(script.args().get(0)?).ok()?,
+                kid_vec: bcs::from_bytes(script.args().get(1)?).ok()?,
+                alg_vec: bcs::from_bytes(script.args().get(2)?).ok()?,
+                e_vec: bcs::from_bytes(script.args().get(3)?).ok()?,
+                n_vec: bcs::from_bytes(script.args().get(4)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn managed_coin_burn(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
         if let TransactionPayload::EntryFunction(script) = payload {
             Some(EntryFunctionCall::ManagedCoinBurn {
                 coin_type: script.ty_args().get(0)?.clone(),
                 amount: bcs::from_bytes(script.args().get(0)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn managed_coin_destroy_caps(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::ManagedCoinDestroyCaps {
+                coin_type: script.ty_args().get(0)?.clone(),
             })
         } else {
             None
@@ -5225,6 +5905,40 @@ mod decoder {
                         .ok()?,
                     metadata_keys: bcs::from_bytes(script.args().get(6)?).ok()?,
                     metadata_values: bcs::from_bytes(script.args().get(7)?).ok()?,
+                },
+            )
+        } else {
+            None
+        }
+    }
+
+    pub fn multisig_account_create_with_existing_account_and_revoke_auth_key_call(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(
+                EntryFunctionCall::MultisigAccountCreateWithExistingAccountAndRevokeAuthKeyCall {
+                    owners: bcs::from_bytes(script.args().get(0)?).ok()?,
+                    num_signatures_required: bcs::from_bytes(script.args().get(1)?).ok()?,
+                    metadata_keys: bcs::from_bytes(script.args().get(2)?).ok()?,
+                    metadata_values: bcs::from_bytes(script.args().get(3)?).ok()?,
+                },
+            )
+        } else {
+            None
+        }
+    }
+
+    pub fn multisig_account_create_with_existing_account_call(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(
+                EntryFunctionCall::MultisigAccountCreateWithExistingAccountCall {
+                    owners: bcs::from_bytes(script.args().get(0)?).ok()?,
+                    num_signatures_required: bcs::from_bytes(script.args().get(1)?).ok()?,
+                    metadata_keys: bcs::from_bytes(script.args().get(2)?).ok()?,
+                    metadata_values: bcs::from_bytes(script.args().get(3)?).ok()?,
                 },
             )
         } else {
@@ -5899,6 +6613,16 @@ mod decoder {
         }
     }
 
+    pub fn transaction_fee_convert_to_aptos_fa_burn_ref(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(_script) = payload {
+            Some(EntryFunctionCall::TransactionFeeConvertToAptosFaBurnRef {})
+        } else {
+            None
+        }
+    }
+
     pub fn version_set_for_next_epoch(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
         if let TransactionPayload::EntryFunction(script) = payload {
             Some(EntryFunctionCall::VersionSetForNextEpoch {
@@ -6170,6 +6894,10 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
             Box::new(decoder::account_rotate_authentication_key_with_rotation_capability),
         );
         map.insert(
+            "account_set_originating_address".to_string(),
+            Box::new(decoder::account_set_originating_address),
+        );
+        map.insert(
             "aptos_account_batch_transfer".to_string(),
             Box::new(decoder::aptos_account_batch_transfer),
         );
@@ -6180,6 +6908,10 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "aptos_account_create_account".to_string(),
             Box::new(decoder::aptos_account_create_account),
+        );
+        map.insert(
+            "aptos_account_fungible_transfer_only".to_string(),
+            Box::new(decoder::aptos_account_fungible_transfer_only),
         );
         map.insert(
             "aptos_account_set_allow_direct_coin_transfers".to_string(),
@@ -6208,6 +6940,14 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "aptos_governance_add_approved_script_hash_script".to_string(),
             Box::new(decoder::aptos_governance_add_approved_script_hash_script),
+        );
+        map.insert(
+            "aptos_governance_batch_partial_vote".to_string(),
+            Box::new(decoder::aptos_governance_batch_partial_vote),
+        );
+        map.insert(
+            "aptos_governance_batch_vote".to_string(),
+            Box::new(decoder::aptos_governance_batch_vote),
         );
         map.insert(
             "aptos_governance_create_proposal".to_string(),
@@ -6240,6 +6980,22 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "code_publish_package_txn".to_string(),
             Box::new(decoder::code_publish_package_txn),
+        );
+        map.insert(
+            "coin_create_coin_conversion_map".to_string(),
+            Box::new(decoder::coin_create_coin_conversion_map),
+        );
+        map.insert(
+            "coin_create_pairing".to_string(),
+            Box::new(decoder::coin_create_pairing),
+        );
+        map.insert(
+            "coin_migrate_coin_store_to_fungible_store".to_string(),
+            Box::new(decoder::coin_migrate_coin_store_to_fungible_store),
+        );
+        map.insert(
+            "coin_migrate_to_fungible_store".to_string(),
+            Box::new(decoder::coin_migrate_to_fungible_store),
         );
         map.insert(
             "coin_transfer".to_string(),
@@ -6326,8 +7082,16 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
             Box::new(decoder::delegation_pool_withdraw),
         );
         map.insert(
+            "jwks_update_federated_jwk_set".to_string(),
+            Box::new(decoder::jwks_update_federated_jwk_set),
+        );
+        map.insert(
             "managed_coin_burn".to_string(),
             Box::new(decoder::managed_coin_burn),
+        );
+        map.insert(
+            "managed_coin_destroy_caps".to_string(),
+            Box::new(decoder::managed_coin_destroy_caps),
         );
         map.insert(
             "managed_coin_initialize".to_string(),
@@ -6376,6 +7140,16 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "multisig_account_create_with_existing_account_and_revoke_auth_key".to_string(),
             Box::new(decoder::multisig_account_create_with_existing_account_and_revoke_auth_key),
+        );
+        map.insert(
+            "multisig_account_create_with_existing_account_and_revoke_auth_key_call".to_string(),
+            Box::new(
+                decoder::multisig_account_create_with_existing_account_and_revoke_auth_key_call,
+            ),
+        );
+        map.insert(
+            "multisig_account_create_with_existing_account_call".to_string(),
+            Box::new(decoder::multisig_account_create_with_existing_account_call),
         );
         map.insert(
             "multisig_account_create_with_owners".to_string(),
@@ -6585,6 +7359,10 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "staking_proxy_set_voter".to_string(),
             Box::new(decoder::staking_proxy_set_voter),
+        );
+        map.insert(
+            "transaction_fee_convert_to_aptos_fa_burn_ref".to_string(),
+            Box::new(decoder::transaction_fee_convert_to_aptos_fa_burn_ref),
         );
         map.insert(
             "version_set_for_next_epoch".to_string(),

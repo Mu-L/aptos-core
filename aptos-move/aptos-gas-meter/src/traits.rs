@@ -7,7 +7,8 @@ use aptos_types::{
     contract_event::ContractEvent, state_store::state_key::StateKey, write_set::WriteOpSize,
 };
 use aptos_vm_types::{
-    change_set::VMChangeSet,
+    change_set::ChangeSetInterface,
+    module_and_script_storage::module_storage::AptosModuleStorage,
     resolver::ExecutorView,
     storage::{
         io_pricing::IoPricing,
@@ -110,8 +111,13 @@ pub trait AptosGasMeter: MoveGasMeter {
     /// Charges an intrinsic cost for executing the transaction.
     ///
     /// The cost stays constant for transactions below a certain size, but will grow proportionally
-    /// for bigger ones.
+    /// for bigger ones. THe multiplier can be used to increase the unit cost for exceptional
+    /// transactions like keyless.
     fn charge_intrinsic_gas_for_transaction(&mut self, txn_size: NumBytes) -> VMResult<()>;
+
+    /// Charges an additional cost for keyless transactions to compensate for the
+    /// expensive computation required.
+    fn charge_keyless(&mut self) -> VMResult<()>;
 
     /// Charges IO gas for the transaction itself.
     fn charge_io_gas_for_transaction(&mut self, txn_size: NumBytes) -> VMResult<()>;
@@ -135,10 +141,11 @@ pub trait AptosGasMeter: MoveGasMeter {
     /// unless you are doing something special, such as injecting additional logging logic.
     fn process_storage_fee_for_all(
         &mut self,
-        change_set: &mut VMChangeSet,
+        change_set: &mut impl ChangeSetInterface,
         txn_size: NumBytes,
         gas_unit_price: FeePerGasUnit,
         executor_view: &dyn ExecutorView,
+        module_storage: &impl AptosModuleStorage,
     ) -> VMResult<Fee> {
         // The new storage fee are only active since version 7.
         if self.feature_version() < 7 {
@@ -158,7 +165,7 @@ pub trait AptosGasMeter: MoveGasMeter {
         // Write set
         let mut write_fee = Fee::new(0);
         let mut total_refund = Fee::new(0);
-        for res in change_set.write_op_info_iter_mut(executor_view) {
+        for res in change_set.write_op_info_iter_mut(executor_view, module_storage) {
             let ChargeAndRefund { charge, refund } = pricing.charge_refund_write_op(
                 params,
                 res.map_err(|err| err.finish(Location::Undefined))?,
@@ -168,12 +175,9 @@ pub trait AptosGasMeter: MoveGasMeter {
         }
 
         // Events (no event fee in v2)
-        let event_fee = change_set
-            .events()
-            .iter()
-            .fold(Fee::new(0), |acc, (event, _)| {
-                acc + pricing.legacy_storage_fee_per_event(params, event)
-            });
+        let event_fee = change_set.events_iter().fold(Fee::new(0), |acc, event| {
+            acc + pricing.legacy_storage_fee_per_event(params, event)
+        });
         let event_discount = pricing.legacy_storage_discount_for_events(params, event_fee);
         let event_net_fee = event_fee
             .checked_sub(event_discount)

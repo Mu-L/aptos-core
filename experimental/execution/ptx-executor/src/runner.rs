@@ -19,8 +19,10 @@ use aptos_types::{
     transaction::signature_verified_transaction::SignatureVerifiedTransaction,
     write_set::TransactionWrite,
 };
-use aptos_vm::{data_cache::AsMoveResolver, AptosVM};
+use aptos_vm::AptosVM;
+use aptos_vm_environment::environment::AptosEnvironment;
 use aptos_vm_logging::log_schema::AdapterLogSchema;
+use aptos_vm_types::module_and_script_storage::AsAptosCodeStorage;
 use rayon::Scope;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -233,12 +235,10 @@ impl<'scope, 'view: 'scope, BaseView: StateView + Sync> Worker<'view, BaseView> 
         let _timer = PER_WORKER_TIMER.timer_with(&[&idx, "block_total"]);
         // Share a VM in the same thread.
         // TODO(ptx): maybe warm up vm like done in AptosExecutorTask
+        let env = AptosEnvironment::new(&self.base_view);
         let vm = {
             let _timer = PER_WORKER_TIMER.timer_with(&[&idx, "vm_init"]);
-            AptosVM::new(
-                &self.base_view.as_move_resolver(),
-                /*override_is_delayed_field_optimization_capable=*/ None,
-            )
+            AptosVM::new(env.clone(), &self.base_view)
         };
 
         loop {
@@ -263,11 +263,13 @@ impl<'scope, 'view: 'scope, BaseView: StateView + Sync> Worker<'view, BaseView> 
                         OverlayedStateView::new_with_overlay(self.base_view, dependencies);
                     let log_context = AdapterLogSchema::new(self.base_view.id(), txn_idx);
 
+                    let code_storage = state_view.as_aptos_code_storage(env.clone());
                     let vm_output = {
                         let _vm = PER_WORKER_TIMER.timer_with(&[&idx, "run_txn_vm"]);
                         vm.execute_single_transaction(
                             &transaction,
                             &vm.as_move_resolver(&state_view),
+                            &code_storage,
                             &log_context,
                         )
                     };
@@ -277,7 +279,7 @@ impl<'scope, 'view: 'scope, BaseView: StateView + Sync> Worker<'view, BaseView> 
 
                     // inform output state values to the manager
                     // TODO use try_into_storage_change_set() instead, and ChangeSet it returns, instead of VMOutput.
-                    for (key, op) in vm_output.change_set().concrete_write_set_iter() {
+                    for (key, op) in vm_output.concrete_write_set_iter() {
                         self.scheduler.try_inform_state_value(
                             (key.clone(), txn_idx),
                             op.expect("PTX executor currently doesn't support non-concrete writes")

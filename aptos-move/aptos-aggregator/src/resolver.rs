@@ -5,13 +5,10 @@ use crate::{
     aggregator_v1_extension::{addition_v1_error, subtraction_v1_error},
     bounded_math::SignedU128,
     delta_change_set::{serialize, DeltaOp},
-    types::{
-        code_invariant_error, DelayedFieldValue, DelayedFieldsSpeculativeError,
-        DeltaApplicationFailureReason, PanicOr,
-    },
+    types::{DelayedFieldValue, DelayedFieldsSpeculativeError, DeltaApplicationFailureReason},
 };
 use aptos_types::{
-    delayed_fields::PanicError,
+    error::{code_invariant_error, PanicError, PanicOr},
     state_store::{
         state_key::StateKey,
         state_value::{StateValue, StateValueMetadata},
@@ -89,7 +86,6 @@ pub trait TAggregatorV1View {
             PartialVMError::new(StatusCode::SPECULATIVE_EXECUTION_ABORT_ERROR)
                 .with_message("Cannot convert delta for deleted aggregator".to_string())
         })?;
-
         delta_op
             .apply_to(base)
             .map_err(|e| match &e {
@@ -139,8 +135,6 @@ pub trait TDelayedFieldView {
     type Identifier;
     type ResourceKey;
     type ResourceGroupTag;
-
-    fn is_delayed_field_optimization_capable(&self) -> bool;
 
     /// Fetch a value of a DelayedField.
     fn get_delayed_field_value(
@@ -227,11 +221,6 @@ where
     type Identifier = DelayedFieldID;
     type ResourceGroupTag = StructTag;
     type ResourceKey = StateKey;
-
-    fn is_delayed_field_optimization_capable(&self) -> bool {
-        // For resolvers that are not capable, it cannot be enabled
-        false
-    }
 
     fn get_delayed_field_value(
         &self,

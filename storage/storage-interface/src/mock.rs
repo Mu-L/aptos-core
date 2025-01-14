@@ -5,10 +5,11 @@
 //! This module provides mock dbreader for tests.
 
 use crate::{errors::AptosDbError, DbReader, DbWriter, Result};
+use aptos_crypto::HashValue;
 use aptos_types::{
     proof::SparseMerkleProofExt,
     state_store::{
-        state_key::{StateKey, StateKeyInner},
+        state_key::{inner::StateKeyInner, StateKey},
         state_value::StateValue,
     },
     transaction::Version,
@@ -25,8 +26,9 @@ impl DbReader for MockDbReaderWriter {
 
     fn get_state_proof_by_version_ext(
         &self,
-        _state_key: &StateKey,
+        _key_hash: &HashValue,
         _version: Version,
+        _root_depth: usize,
     ) -> Result<SparseMerkleProofExt> {
         Ok(SparseMerkleProofExt::new(None, vec![]))
     }

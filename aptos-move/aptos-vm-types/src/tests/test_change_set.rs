@@ -4,12 +4,16 @@
 use super::utils::{mock_tag_0, VMChangeSetBuilder};
 use crate::{
     abstract_write_op::{AbstractResourceWriteOp, GroupWrite},
-    change_set::VMChangeSet,
+    change_set::{
+        create_vm_change_set_with_module_write_set_when_delayed_field_optimization_disabled,
+        VMChangeSet,
+    },
+    module_write_set::ModuleWriteSet,
     resolver::ResourceGroupSize,
     tests::utils::{
         as_bytes, as_state_key, mock_add, mock_create, mock_create_with_layout, mock_delete,
         mock_delete_with_layout, mock_modify, mock_modify_with_layout, mock_tag_1, raw_metadata,
-        ExpandedVMChangeSetBuilder, MockChangeSetChecker,
+        ExpandedVMChangeSetBuilder,
     },
 };
 use aptos_aggregator::{
@@ -18,8 +22,8 @@ use aptos_aggregator::{
     delta_change_set::DeltaWithMax,
 };
 use aptos_types::{
-    access_path::AccessPath,
-    delayed_fields::{PanicError, SnapshotToStringFormula},
+    delayed_fields::SnapshotToStringFormula,
+    error::PanicError,
     state_store::{state_key::StateKey, state_value::StateValueMetadata},
     transaction::ChangeSet as StorageChangeSet,
     write_set::{WriteOp, WriteSetMut},
@@ -87,21 +91,6 @@ macro_rules! resource_write_set_1 {
     };
 }
 
-macro_rules! module_write_set_1 {
-    ($d:ident) => {
-        vec![
-            mock_create(format!("0{}", $d), 0),
-            mock_modify(format!("1{}", $d), 1),
-            mock_delete(format!("2{}", $d)),
-            mock_create(format!("7{}", $d), 7),
-            mock_create(format!("8{}", $d), 8),
-            mock_modify(format!("10{}", $d), 10),
-            mock_modify(format!("11{}", $d), 11),
-            mock_delete(format!("12{}", $d)),
-        ]
-    };
-}
-
 macro_rules! resource_write_set_2 {
     ($d:ident) => {
         vec![
@@ -117,20 +106,6 @@ macro_rules! resource_write_set_2 {
     };
 }
 
-macro_rules! module_write_set_2 {
-    ($d:ident) => {
-        vec![
-            mock_create(format!("3{}", $d), 103),
-            mock_modify(format!("4{}", $d), 104),
-            mock_delete(format!("5{}", $d)),
-            mock_modify(format!("7{}", $d), 107),
-            mock_delete(format!("8{}", $d)),
-            mock_modify(format!("10{}", $d), 110),
-            mock_delete(format!("11{}", $d)),
-            mock_create(format!("12{}", $d), 112),
-        ]
-    };
-}
 macro_rules! expected_resource_write_set {
     ($d:ident) => {
         BTreeMap::from([
@@ -148,30 +123,11 @@ macro_rules! expected_resource_write_set {
     };
 }
 
-macro_rules! expected_module_write_set {
-    ($d:ident) => {
-        BTreeMap::from([
-            mock_create(format!("0{}", $d), 0),
-            mock_modify(format!("1{}", $d), 1),
-            mock_delete(format!("2{}", $d)),
-            mock_create(format!("3{}", $d), 103),
-            mock_modify(format!("4{}", $d), 104),
-            mock_delete(format!("5{}", $d)),
-            mock_create(format!("7{}", $d), 107),
-            mock_modify(format!("10{}", $d), 110),
-            mock_delete(format!("11{}", $d)),
-            mock_modify(format!("12{}", $d), 112),
-        ])
-    };
-}
-
 // Populate sets according to the spec. Skip keys which lead to
 // errors because we test them separately.
 fn build_change_sets_for_test() -> (VMChangeSet, VMChangeSet) {
     let mut descriptor = "r";
     let resource_write_set_1 = resource_write_set_1!(descriptor);
-    descriptor = "m";
-    let module_write_set_1 = module_write_set_1!(descriptor);
     let aggregator_write_set_1 = vec![mock_create("18a", 18), mock_modify("19a", 19)];
     let aggregator_delta_set_1 = vec![
         mock_add("15a", 15),
@@ -181,15 +137,12 @@ fn build_change_sets_for_test() -> (VMChangeSet, VMChangeSet) {
     ];
     let change_set_1 = VMChangeSetBuilder::new()
         .with_resource_write_set(resource_write_set_1)
-        .with_module_write_set(module_write_set_1)
         .with_aggregator_v1_write_set(aggregator_write_set_1)
         .with_aggregator_v1_delta_set(aggregator_delta_set_1)
         .build();
 
     descriptor = "r";
     let resource_write_set_2 = resource_write_set_2!(descriptor);
-    descriptor = "m";
-    let module_write_set_2 = module_write_set_2!(descriptor);
     let aggregator_write_set_2 = vec![mock_modify("22a", 122), mock_delete("23a")];
     let aggregator_delta_set_2 = vec![
         mock_add("16a", 116),
@@ -199,7 +152,6 @@ fn build_change_sets_for_test() -> (VMChangeSet, VMChangeSet) {
     ];
     let change_set_2 = VMChangeSetBuilder::new()
         .with_resource_write_set(resource_write_set_2)
-        .with_module_write_set(module_write_set_2)
         .with_aggregator_v1_write_set(aggregator_write_set_2)
         .with_aggregator_v1_delta_set(aggregator_delta_set_2)
         .build();
@@ -210,19 +162,12 @@ fn build_change_sets_for_test() -> (VMChangeSet, VMChangeSet) {
 #[test]
 fn test_successful_squash() {
     let (mut change_set, additional_change_set) = build_change_sets_for_test();
-    assert_ok!(
-        change_set.squash_additional_change_set(additional_change_set, &MockChangeSetChecker)
-    );
+    assert_ok!(change_set.squash_additional_change_set(additional_change_set,));
 
-    let mut descriptor = "r";
+    let descriptor = "r";
     assert_eq!(
         change_set.resource_write_set(),
         &expected_resource_write_set!(descriptor)
-    );
-    descriptor = "m";
-    assert_eq!(
-        change_set.module_write_set(),
-        &expected_module_write_set!(descriptor)
     );
 
     let expected_aggregator_write_set = BTreeMap::from([
@@ -255,7 +200,7 @@ macro_rules! assert_invariant_violation {
             assert!(
                 err.major_status() == StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR
                     || err.major_status()
-                        == StatusCode::DELAYED_MATERIALIZATION_CODE_INVARIANT_ERROR
+                        == StatusCode::DELAYED_FIELD_OR_BLOCKSTM_CODE_INVARIANT_ERROR
             );
         };
 
@@ -265,15 +210,7 @@ macro_rules! assert_invariant_violation {
         let cs2 = VMChangeSetBuilder::new()
             .with_resource_write_set($w2.clone())
             .build();
-        let res = cs1.squash_additional_change_set(cs2, &MockChangeSetChecker);
-        check(res);
-        let mut cs1 = VMChangeSetBuilder::new()
-            .with_module_write_set($w3.clone())
-            .build();
-        let cs2 = VMChangeSetBuilder::new()
-            .with_module_write_set($w4.clone())
-            .build();
-        let res = cs1.squash_additional_change_set(cs2, &MockChangeSetChecker);
+        let res = cs1.squash_additional_change_set(cs2);
         check(res);
         let mut cs1 = VMChangeSetBuilder::new()
             .with_aggregator_v1_write_set($w3.clone())
@@ -281,7 +218,7 @@ macro_rules! assert_invariant_violation {
         let cs2 = VMChangeSetBuilder::new()
             .with_aggregator_v1_write_set($w4.clone())
             .build();
-        let res = cs1.squash_additional_change_set(cs2, &MockChangeSetChecker);
+        let res = cs1.squash_additional_change_set(cs2);
         check(res);
     };
 }
@@ -338,7 +275,7 @@ fn test_unsuccessful_squash_delete_delta() {
     let additional_change_set = VMChangeSetBuilder::new()
         .with_aggregator_v1_delta_set(aggregator_delta_set_2)
         .build();
-    let res = change_set.squash_additional_change_set(additional_change_set, &MockChangeSetChecker);
+    let res = change_set.squash_additional_change_set(additional_change_set);
     let err = assert_err!(res);
     assert_eq!(
         err.major_status(),
@@ -358,7 +295,7 @@ fn test_unsuccessful_squash_delta_create() {
     let additional_change_set = VMChangeSetBuilder::new()
         .with_aggregator_v1_write_set(aggregator_write_set_2)
         .build();
-    let res = change_set.squash_additional_change_set(additional_change_set, &MockChangeSetChecker);
+    let res = change_set.squash_additional_change_set(additional_change_set);
     let err = assert_err!(res);
     assert_eq!(
         err.major_status(),
@@ -372,14 +309,12 @@ fn test_roundtrip_to_storage_change_set() {
         address: AccountAddress::ONE,
         module: ident_str!("foo").into(),
         name: ident_str!("Foo").into(),
-        type_params: vec![],
+        type_args: vec![],
     };
     let test_module_id = ModuleId::new(AccountAddress::ONE, ident_str!("bar").into());
 
-    let resource_key = StateKey::access_path(
-        AccessPath::resource_access_path(AccountAddress::ONE, test_struct_tag).unwrap(),
-    );
-    let module_key = StateKey::access_path(AccessPath::code_access_path(test_module_id));
+    let resource_key = StateKey::resource(&AccountAddress::ONE, &test_struct_tag).unwrap();
+    let module_key = StateKey::module_id(&test_module_id);
     let write_set = WriteSetMut::new(vec![
         (resource_key, WriteOp::legacy_deletion()),
         (module_key, WriteOp::legacy_deletion()),
@@ -388,13 +323,13 @@ fn test_roundtrip_to_storage_change_set() {
     .unwrap();
 
     let storage_change_set_before = StorageChangeSet::new(write_set, vec![]);
-    let change_set = assert_ok!(
-        VMChangeSet::try_from_storage_change_set_with_delayed_field_optimization_disabled(
+    let (change_set, module_write_set) =
+        create_vm_change_set_with_module_write_set_when_delayed_field_optimization_disabled(
             storage_change_set_before.clone(),
-            &MockChangeSetChecker,
-        )
-    );
-    let storage_change_set_after = assert_ok!(change_set.try_into_storage_change_set());
+        );
+
+    let storage_change_set_after =
+        assert_ok!(change_set.try_combine_into_storage_change_set(module_write_set));
     assert_eq!(storage_change_set_before, storage_change_set_after)
 }
 
@@ -408,7 +343,7 @@ fn test_failed_conversion_to_change_set() {
         .build();
 
     // Unchecked conversion ignores deltas.
-    let vm_status = change_set.try_into_storage_change_set();
+    let vm_status = change_set.try_combine_into_storage_change_set(ModuleWriteSet::empty());
     assert_matches!(vm_status, Err(PanicError::CodeInvariantError(_)));
 }
 
@@ -421,7 +356,9 @@ fn test_conversion_to_change_set_fails() {
         .with_aggregator_v1_delta_set(aggregator_delta_set)
         .build();
 
-    assert_err!(change_set.clone().try_into_storage_change_set());
+    assert_err!(change_set
+        .clone()
+        .try_combine_into_storage_change_set(ModuleWriteSet::empty()));
 }
 
 #[test]
@@ -468,7 +405,7 @@ fn test_aggregator_v2_snapshots_and_derived() {
         .with_delayed_field_change_set(agg_changes_2)
         .build();
 
-    assert_ok!(change_set_1.squash_additional_change_set(change_set_2, &MockChangeSetChecker));
+    assert_ok!(change_set_1.squash_additional_change_set(change_set_2,));
 
     let output_map = change_set_1.delayed_field_change_set();
     assert_eq!(output_map.len(), 3);
@@ -499,10 +436,7 @@ fn test_aggregator_v2_snapshots_and_derived() {
 
 #[test]
 fn test_resource_groups_squashing() {
-    let modification_metadata = WriteOp::Modification {
-        data: Bytes::new(),
-        metadata: raw_metadata(2000),
-    };
+    let modification_metadata = WriteOp::modification(Bytes::new(), raw_metadata(2000));
 
     macro_rules! as_create_op {
         ($val:expr) => {
@@ -568,9 +502,7 @@ fn test_resource_groups_squashing() {
 
     {
         let mut change_set = create_tag_0.clone();
-        assert_ok!(
-            change_set.squash_additional_change_set(modify_tag_0.clone(), &MockChangeSetChecker)
-        );
+        assert_ok!(change_set.squash_additional_change_set(modify_tag_0.clone(),));
         assert_eq!(change_set.resource_write_set().len(), 1);
         // create(x)+modify(y) becomes create(y)
         assert_some_eq!(
@@ -586,9 +518,7 @@ fn test_resource_groups_squashing() {
 
     {
         let mut change_set = create_tag_0.clone();
-        assert_ok!(
-            change_set.squash_additional_change_set(create_tag_1.clone(), &MockChangeSetChecker)
-        );
+        assert_ok!(change_set.squash_additional_change_set(create_tag_1.clone(),));
         assert_eq!(change_set.resource_write_set().len(), 1);
         assert_some_eq!(
             change_set.resource_write_set().get(&as_state_key!("1")),
@@ -600,9 +530,7 @@ fn test_resource_groups_squashing() {
             ))
         );
 
-        assert_ok!(
-            change_set.squash_additional_change_set(modify_tag_1.clone(), &MockChangeSetChecker)
-        );
+        assert_ok!(change_set.squash_additional_change_set(modify_tag_1.clone(),));
         assert_eq!(change_set.resource_write_set().len(), 1);
         // create(x)+modify(y) becomes create(y)
         assert_some_eq!(
@@ -618,9 +546,7 @@ fn test_resource_groups_squashing() {
 
     {
         let mut change_set = create_tag_0.clone();
-        assert_ok!(
-            change_set.squash_additional_change_set(modify_tag_1.clone(), &MockChangeSetChecker)
-        );
+        assert_ok!(change_set.squash_additional_change_set(modify_tag_1.clone(),));
         assert_eq!(change_set.resource_write_set().len(), 1);
         assert_some_eq!(
             change_set.resource_write_set().get(&as_state_key!("1")),
@@ -643,7 +569,6 @@ fn test_resource_groups_squashing() {
                     (modification_metadata.metadata().clone(), 400)
                 )])
                 .build(),
-            &MockChangeSetChecker
         ));
     }
 }
@@ -665,10 +590,7 @@ fn test_write_and_read_discrepancy_caught() {
         )])
         .try_build());
 
-    let metadata_op = WriteOp::Modification {
-        data: Bytes::new(),
-        metadata: raw_metadata(1000),
-    };
+    let metadata_op = WriteOp::modification(Bytes::new(), raw_metadata(1000));
     let group_size = ResourceGroupSize::Combined {
         num_tagged_resources: 1,
         all_tagged_resources_size: 14,
@@ -709,17 +631,9 @@ mod tests {
 
     pub(crate) fn write_op_with_metadata(type_idx: u8, v: u128) -> WriteOp {
         match type_idx {
-            CREATION => WriteOp::Creation {
-                data: vec![].into(),
-                metadata: raw_metadata(v as u64),
-            },
-            MODIFICATION => WriteOp::Modification {
-                data: vec![].into(),
-                metadata: raw_metadata(v as u64),
-            },
-            DELETION => WriteOp::Deletion {
-                metadata: raw_metadata(v as u64),
-            },
+            CREATION => WriteOp::creation(vec![].into(), raw_metadata(v as u64)),
+            MODIFICATION => WriteOp::modification(vec![].into(), raw_metadata(v as u64)),
+            DELETION => WriteOp::deletion(raw_metadata(v as u64)),
             _ => unreachable!("Wrong type index for test"),
         }
     }
@@ -766,9 +680,7 @@ mod tests {
             None
         );
         assert_group_write_size!(
-            WriteOp::Deletion {
-                metadata: raw_metadata(10)
-            },
+            WriteOp::deletion(raw_metadata(10)),
             ResourceGroupSize::zero_combined(),
             None
         );
@@ -801,10 +713,7 @@ mod tests {
             Some(sizes[0])
         );
         assert_group_write_size!(
-            WriteOp::Creation {
-                data: Bytes::new(),
-                metadata: raw_metadata(20)
-            },
+            WriteOp::creation(Bytes::new(), raw_metadata(20)),
             sizes[1],
             Some(sizes[1])
         );
@@ -814,10 +723,7 @@ mod tests {
             Some(sizes[2])
         );
         assert_group_write_size!(
-            WriteOp::Modification {
-                data: Bytes::new(),
-                metadata: raw_metadata(30)
-            },
+            WriteOp::modification(Bytes::new(), raw_metadata(30)),
             sizes[3],
             Some(sizes[3])
         );
@@ -825,8 +731,8 @@ mod tests {
 
     #[test]
     fn test_squash_groups_one_empty() {
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
 
         let mut base_update = BTreeMap::new();
         base_update.insert(
@@ -864,7 +770,7 @@ mod tests {
     #[test_case(1, 2)] // modify, delete
     #[test_case(2, 0)] // delete, create
     fn test_squash_groups_mergeable_metadata(base_type_idx: u8, additional_type_idx: u8) {
-        let key = StateKey::raw(vec![0]);
+        let key = StateKey::raw(&[0]);
 
         let mut base_update = BTreeMap::new();
         let mut additional_update = BTreeMap::new();
@@ -902,7 +808,7 @@ mod tests {
     #[test_case(2, 1)] // delete, modify
     #[test_case(2, 2)] // delete, delete
     fn test_squash_groups_error(base_type_idx: u8, additional_type_idx: u8) {
-        let key = StateKey::raw(vec![0]);
+        let key = StateKey::raw(&[0]);
 
         let mut base_update = BTreeMap::new();
         let mut additional_update = BTreeMap::new();
@@ -928,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_squash_groups_noop() {
-        let key = StateKey::raw(vec![0]);
+        let key = StateKey::raw(&[0]);
 
         let mut base_update = BTreeMap::new();
         let mut additional_update = BTreeMap::new();
@@ -960,8 +866,8 @@ mod tests {
 
     #[test]
     fn test_inner_ops() {
-        let key_1 = StateKey::raw(vec![1]);
-        let key_2 = StateKey::raw(vec![2]);
+        let key_1 = StateKey::raw(&[1]);
+        let key_2 = StateKey::raw(&[2]);
 
         let mut base_update = BTreeMap::new();
         let mut additional_update = BTreeMap::new();

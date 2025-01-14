@@ -2,10 +2,19 @@
 // Parts of the project are originally copyright © Meta Platforms, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::block_storage::{BlockReader, BlockStore};
+#![allow(clippy::unwrap_used)]
+use crate::{
+    block_storage::{BlockReader, BlockStore},
+    liveness::{
+        proposal_status_tracker::{TOptQSPullParamsProvider, TPastProposalStatusTracker},
+        round_state::NewRoundReason,
+    },
+    payload_manager::DirectMempoolPayloadManager,
+};
 use aptos_consensus_types::{
     block::{block_test_utils::certificate_for_genesis, Block},
     common::{Author, Round},
+    payload_pull_params::OptQSPayloadPullParams,
     pipelined_block::PipelinedBlock,
     quorum_cert::QuorumCert,
     sync_info::SyncInfo,
@@ -25,11 +34,12 @@ mod mock_state_computer;
 mod mock_storage;
 
 use crate::{
-    payload_manager::PayloadManager, pipeline::execution_client::DummyExecutionClient,
+    block_storage::pending_blocks::PendingBlocks, pipeline::execution_client::DummyExecutionClient,
     util::mock_time_service::SimulatedTimeService,
 };
 use aptos_consensus_types::{block::block_test_utils::gen_test_certificate, common::Payload};
 use aptos_crypto::ed25519::{Ed25519PrivateKey, Ed25519Signature};
+use aptos_infallible::Mutex;
 use aptos_types::{
     block_info::BlockInfo,
     chain_id::ChainId,
@@ -88,7 +98,10 @@ pub fn build_empty_tree() -> Arc<BlockStore> {
         10, // max pruned blocks in mem
         Arc::new(SimulatedTimeService::new()),
         10,
-        Arc::from(PayloadManager::DirectMempool),
+        Arc::from(DirectMempoolPayloadManager::new()),
+        false,
+        Arc::new(Mutex::new(PendingBlocks::new())),
+        None,
     ))
 }
 
@@ -201,7 +214,11 @@ pub fn placeholder_ledger_info() -> LedgerInfo {
 }
 
 pub fn placeholder_sync_info() -> SyncInfo {
-    SyncInfo::new(certificate_for_genesis(), certificate_for_genesis(), None)
+    SyncInfo::new(
+        certificate_for_genesis(),
+        certificate_for_genesis().into_wrapped_ledger_info(),
+        None,
+    )
 }
 
 fn nocapture() -> bool {
@@ -258,4 +275,18 @@ pub(crate) fn create_vec_signed_transactions_with_gas(
     (0..size)
         .map(|_| create_signed_transaction(gas_unit_price))
         .collect()
+}
+
+pub struct MockOptQSPayloadProvider {}
+
+impl TOptQSPullParamsProvider for MockOptQSPayloadProvider {
+    fn get_params(&self) -> Option<OptQSPayloadPullParams> {
+        None
+    }
+}
+
+pub struct MockPastProposalStatusTracker {}
+
+impl TPastProposalStatusTracker for MockPastProposalStatusTracker {
+    fn push(&self, _status: NewRoundReason) {}
 }

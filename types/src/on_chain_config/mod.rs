@@ -14,11 +14,11 @@ use move_core_types::{
     account_address::AccountAddress,
     ident_str,
     identifier::{IdentStr, Identifier},
-    language_storage::StructTag,
+    language_storage::{StructTag, TypeTag},
     move_resource::{MoveResource, MoveStructType},
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{collections::HashMap, fmt, fmt::Debug, sync::Arc};
+use std::{collections::HashMap, fmt, fmt::Debug, str::FromStr, sync::Arc};
 
 mod approved_execution_hashes;
 mod aptos_features;
@@ -29,6 +29,7 @@ mod consensus_config;
 mod execution_config;
 mod gas_schedule;
 mod jwk_consensus_config;
+pub mod randomness_api_v0_config;
 mod randomness_config;
 mod timed_features;
 mod timestamp;
@@ -51,11 +52,13 @@ pub use self::{
         BlockGasLimitType, ExecutionConfigV1, ExecutionConfigV2, ExecutionConfigV4,
         OnChainExecutionConfig, TransactionDeduperType, TransactionShufflerType,
     },
-    gas_schedule::{GasSchedule, GasScheduleV2, StorageGasSchedule},
+    gas_schedule::{DiffItem, GasSchedule, GasScheduleV2, StorageGasSchedule},
     jwk_consensus_config::{
         ConfigV1 as JWKConsensusConfigV1, OIDCProvider, OnChainJWKConsensusConfig,
     },
-    randomness_config::{OnChainRandomnessConfig, RandomnessConfigMoveStruct},
+    randomness_config::{
+        OnChainRandomnessConfig, RandomnessConfigMoveStruct, RandomnessConfigSeqNum,
+    },
     timed_features::{TimedFeatureFlag, TimedFeatureOverride, TimedFeatures, TimedFeaturesBuilder},
     timestamp::CurrentTimeMicroseconds,
     transaction_fee::TransactionFeeBurnCap,
@@ -175,11 +178,19 @@ pub trait OnChainConfig: Send + Sync + DeserializeOwned {
     where
         T: ConfigStorage + ?Sized,
     {
-        match storage.fetch_config_bytes(&StateKey::resource(Self::address(), &Self::struct_tag()))
-        {
-            Some(bytes) => Self::deserialize_into_config(&bytes).ok(),
-            None => None,
-        }
+        Some(Self::fetch_config_and_bytes(storage)?.0)
+    }
+
+    /// Same as [Self::fetch_config], but also returns the underlying bytes that were used to
+    /// deserialize into config.
+    fn fetch_config_and_bytes<T>(storage: &T) -> Option<(Self, Bytes)>
+    where
+        T: ConfigStorage + ?Sized,
+    {
+        let state_key = StateKey::on_chain_config::<Self>().ok()?;
+        let bytes = storage.fetch_config_bytes(&state_key)?;
+        let config = Self::deserialize_into_config(&bytes).ok()?;
+        Some((config, bytes))
     }
 
     fn address() -> &'static AccountAddress {
@@ -203,6 +214,10 @@ pub fn new_epoch_event_key() -> EventKey {
     EventKey::new(2, CORE_CODE_ADDRESS)
 }
 
+pub fn new_epoch_event_type_tag() -> TypeTag {
+    TypeTag::from_str("0x1::reconfiguration::NewEpoch").expect("cannot fail")
+}
+
 pub fn access_path_for_config(config_id: ConfigID) -> anyhow::Result<AccessPath> {
     let struct_tag = struct_tag_for_config(config_id);
     Ok(AccessPath::new(
@@ -216,13 +231,14 @@ pub fn struct_tag_for_config(config_id: ConfigID) -> StructTag {
         address: CORE_CODE_ADDRESS,
         module: Identifier::new(config_id.1).expect("fail to make identifier"),
         name: Identifier::new(config_id.2).expect("fail to make identifier"),
-        type_params: vec![],
+        type_args: vec![],
     }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ConfigurationResource {
     epoch: u64,
+    /// Unix epoch timestamp (in microseconds) of the last reconfiguration time.
     last_reconfiguration_time: u64,
     events: EventHandle,
 }
@@ -232,7 +248,8 @@ impl ConfigurationResource {
         self.epoch
     }
 
-    pub fn last_reconfiguration_time(&self) -> u64 {
+    /// Return the last Unix epoch timestamp (in microseconds) of the last reconfiguration time.
+    pub fn last_reconfiguration_time_micros(&self) -> u64 {
         self.last_reconfiguration_time
     }
 
@@ -252,6 +269,11 @@ impl ConfigurationResource {
             last_reconfiguration_time,
             events,
         }
+    }
+
+    #[cfg(feature = "fuzzing")]
+    pub fn set_last_reconfiguration_time_for_test(&mut self, last_reconfiguration_time: u64) {
+        self.last_reconfiguration_time = last_reconfiguration_time;
     }
 }
 

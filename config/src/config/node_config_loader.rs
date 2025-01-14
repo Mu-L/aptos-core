@@ -159,14 +159,14 @@ fn get_chain_id(node_config: &NodeConfig) -> Result<ChainId, Error> {
     // TODO: can we make this less hacky?
 
     // Load the genesis transaction from disk
-    let genesis_txn = get_genesis_txn(node_config).ok_or(Error::InvariantViolation(
-        "The genesis transaction was not found!".to_string(),
-    ))?;
+    let genesis_txn = get_genesis_txn(node_config).ok_or_else(|| {
+        Error::InvariantViolation("The genesis transaction was not found!".to_string())
+    })?;
 
     // Extract the chain ID from the genesis transaction
     match genesis_txn {
         Transaction::GenesisTransaction(WriteSetPayload::Direct(change_set)) => {
-            let chain_id_state_key = StateKey::on_chain_config::<ChainId>();
+            let chain_id_state_key = StateKey::on_chain_config::<ChainId>()?;
 
             // Get the write op from the write set
             let write_set_mut = change_set.clone().write_set().clone().into_mut();

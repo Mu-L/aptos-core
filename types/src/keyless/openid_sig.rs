@@ -18,6 +18,7 @@ use serde_with::skip_serializing_none;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
 pub struct OpenIdSig {
     /// The decoded bytes of the JWS signature in the JWT (<https://datatracker.ietf.org/doc/html/rfc7515#section-3>)
     #[serde(with = "serde_bytes")]
@@ -39,7 +40,7 @@ pub struct OpenIdSig {
 impl OpenIdSig {
     /// The size of the blinding factor used to compute the nonce commitment to the EPK and expiration
     /// date. This can be upgraded, if the OAuth nonce reconstruction is upgraded carefully.
-    pub const EPK_BLINDER_NUM_BYTES: usize = poseidon_bn254::BYTES_PACKED_PER_SCALAR;
+    pub const EPK_BLINDER_NUM_BYTES: usize = poseidon_bn254::keyless::BYTES_PACKED_PER_SCALAR;
 
     /// Verifies an `OpenIdSig` by doing the following checks:
     ///  1. Check that the ephemeral public key lifespan is under MAX_EXPIRY_HORIZON_SECS
@@ -60,9 +61,16 @@ impl OpenIdSig {
     ) -> anyhow::Result<()> {
         let claims: Claims = serde_json::from_str(&self.jwt_payload_json)?;
 
-        let max_expiration_date =
-            seconds_from_epoch(claims.oidc_claims.iat + config.max_exp_horizon_secs);
-        let expiration_date = seconds_from_epoch(exp_timestamp_secs);
+        let max_expiration_date = seconds_from_epoch(
+            claims
+                .oidc_claims
+                .iat
+                .checked_add(config.max_exp_horizon_secs)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Overflow when adding iat and max_exp_horizon_secs")
+                })?,
+        )?;
+        let expiration_date = seconds_from_epoch(exp_timestamp_secs)?;
 
         ensure!(
             expiration_date < max_expiration_date,
@@ -126,7 +134,7 @@ impl OpenIdSig {
             base64url_encode_str(&self.jwt_payload_json),
             base64url_encode_bytes(&self.jwt_sig)
         );
-        rsa_jwk.verify_signature(&jwt_b64)?;
+        rsa_jwk.verify_signature_without_exp_check(&jwt_b64)?;
         Ok(())
     }
 
@@ -136,13 +144,15 @@ impl OpenIdSig {
         epk: &EphemeralPublicKey,
         config: &Configuration,
     ) -> anyhow::Result<String> {
-        let mut frs = poseidon_bn254::pad_and_pack_bytes_to_scalars_with_len(
+        let mut frs = poseidon_bn254::keyless::pad_and_pack_bytes_to_scalars_with_len(
             epk.to_bytes().as_slice(),
             config.max_commited_epk_bytes as usize,
         )?;
 
         frs.push(Fr::from(exp_timestamp_secs));
-        frs.push(poseidon_bn254::pack_bytes_to_one_scalar(epk_blinder)?);
+        frs.push(poseidon_bn254::keyless::pack_bytes_to_one_scalar(
+            epk_blinder,
+        )?);
 
         let nonce_fr = poseidon_bn254::hash_scalars(frs)?;
         Ok(nonce_fr.to_string())

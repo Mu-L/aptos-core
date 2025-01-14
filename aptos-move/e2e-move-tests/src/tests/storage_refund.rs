@@ -97,9 +97,8 @@ const LEEWAY: u64 = 2000;
 
 fn read_slot_fee_from_gas_schedule(h: &MoveHarness) -> u64 {
     let slot_fee = h
-        .new_vm()
-        .gas_params()
-        .unwrap()
+        .get_gas_params()
+        .1
         .vm
         .txn
         .storage_fee_per_state_slot
@@ -160,7 +159,7 @@ fn assert_result(
     for (_state_key, write_op) in txn_out.write_set() {
         match write_op {
             WriteOp::Creation { .. } => creates += 1,
-            WriteOp::Deletion { metadata } => {
+            WriteOp::Deletion(metadata) => {
                 if metadata.is_none() {
                     panic!("This test expects all deletions to have metadata")
                 }

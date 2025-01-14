@@ -44,8 +44,10 @@ module "validator" {
   validator_name = "aptos-node"
 
   # K8s config
-  k8s_api_sources         = var.k8s_api_sources
-  cluster_ipv4_cidr_block = var.cluster_ipv4_cidr_block
+  k8s_api_sources                     = var.k8s_api_sources
+  cluster_ipv4_cidr_block             = var.cluster_ipv4_cidr_block
+  router_nat_ip_allocate_option       = var.router_nat_ip_allocate_option
+  enable_endpoint_independent_mapping = var.enable_endpoint_independent_mapping
 
   # autoscaling
   gke_enable_node_autoprovisioning     = var.gke_enable_node_autoprovisioning
@@ -53,6 +55,7 @@ module "validator" {
   gke_node_autoprovisioning_max_memory = var.gke_node_autoprovisioning_max_memory
   gke_autoscaling_profile              = var.gke_autoscaling_profile
   gke_autoscaling_max_node_count       = var.gke_autoscaling_max_node_count
+  enable_vertical_pod_autoscaling      = var.enable_vertical_pod_autoscaling
 
   # Testnet config
   workspace_name_override = var.workspace_name_override

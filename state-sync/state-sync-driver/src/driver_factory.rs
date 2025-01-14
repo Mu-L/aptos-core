@@ -124,7 +124,8 @@ impl DriverFactory {
             ClientNotificationListener::new(client_notification_receiver);
         let (commit_notification_sender, commit_notification_listener) =
             CommitNotificationListener::new();
-        let consensus_notification_handler = ConsensusNotificationHandler::new(consensus_listener);
+        let consensus_notification_handler =
+            ConsensusNotificationHandler::new(consensus_listener, time_service.clone());
         let (error_notification_sender, error_notification_listener) =
             ErrorNotificationListener::new();
         let mempool_notification_handler =
@@ -158,6 +159,7 @@ impl DriverFactory {
         // Create the driver configuration
         let driver_configuration = DriverConfiguration::new(
             node_config.state_sync.state_sync_driver,
+            node_config.consensus_observer,
             node_config.base.role,
             waypoint,
         );

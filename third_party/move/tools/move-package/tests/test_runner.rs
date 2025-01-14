@@ -4,18 +4,18 @@
 
 use anyhow::bail;
 use move_command_line_common::testing::{
-    add_update_baseline_fix, format_diff, read_env_update_baseline, EXP_EXT, EXP_EXT_V2,
+    add_update_baseline_fix, format_diff, read_env_update_baseline, EXP_EXT,
 };
 use move_compiler::shared::known_attributes::KnownAttribute;
 use move_model::metadata::{CompilerVersion, LanguageVersion};
 use move_package::{
     compilation::{build_plan::BuildPlan, model_builder::ModelBuilder},
-    package_hooks,
-    package_hooks::PackageHooks,
+    package_hooks::{self, PackageHooks},
     resolution::resolution_graph as RG,
     source_package::{
         manifest_parser as MP,
         parsed_manifest::{CustomDepInfo, PackageDigest},
+        std_lib::StdVersion,
     },
     BuildConfig, CompilerConfig, ModelConfig,
 };
@@ -29,6 +29,7 @@ use tempfile::tempdir;
 
 const COMPILE_EXT: &str = "compile";
 const MODEL_EXT: &str = "model";
+const OVERRIDE_EXT: &str = "override";
 
 fn run_test_impl(
     path: &Path,
@@ -39,6 +40,15 @@ fn run_test_impl(
         ..Default::default()
     };
     compiler_config.compiler_version = Some(compiler_version);
+    let override_path = path.with_extension(OVERRIDE_EXT);
+    let override_std = if override_path.is_file() {
+        Some(
+            StdVersion::from_rev(&fs::read_to_string(override_path)?)
+                .expect("one of mainnet/testnet/devnet"),
+        )
+    } else {
+        None
+    };
     let should_compile = path.with_extension(COMPILE_EXT).is_file();
     let should_model = path.with_extension(MODEL_EXT).is_file();
     let contents = fs::read_to_string(path)?;
@@ -51,6 +61,7 @@ fn run_test_impl(
                 BuildConfig {
                     dev_mode: true,
                     test_mode: false,
+                    override_std,
                     generate_docs: false,
                     generate_abis: false,
                     install_dir: Some(tempdir().unwrap().path().to_path_buf()),
@@ -71,7 +82,7 @@ fn run_test_impl(
                 .into())
             },
             (true, _) => match BuildPlan::create(resolved_package)
-                .and_then(|bp| bp.compile_no_exit(&compiler_config.clone(), &mut Vec::new()))
+                .and_then(|bp| bp.compile_no_exit(&compiler_config.clone(), vec![], &mut vec![]))
             {
                 Ok((mut pkg, _)) => {
                     pkg.compiled_package_info.source_digest =
@@ -111,13 +122,8 @@ fn check_or_update(
     path: &Path,
     output: String,
     update_baseline: bool,
-    compiler_version: CompilerVersion,
 ) -> datatest_stable::Result<()> {
-    let exp_ext = if compiler_version == CompilerVersion::V2_0 {
-        EXP_EXT_V2
-    } else {
-        EXP_EXT
-    };
+    let exp_ext = EXP_EXT;
     let exp_path = path.with_extension(exp_ext);
     let exp_exists = exp_path.is_file();
     if update_baseline {
@@ -157,12 +163,7 @@ pub fn run_test(path: &Path) -> datatest_stable::Result<()> {
 
     let output_v1 = run_test_impl(path, CompilerVersion::default())?;
     let update_baseline = read_env_update_baseline();
-    check_or_update(
-        path,
-        output_v1.clone(),
-        update_baseline,
-        CompilerVersion::default(),
-    )
+    check_or_update(path, output_v1.clone(), update_baseline)
 }
 
 /// Some dummy hooks for testing the hook mechanism

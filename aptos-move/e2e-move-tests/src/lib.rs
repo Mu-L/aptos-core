@@ -7,12 +7,11 @@ pub mod aptos_governance;
 pub mod harness;
 pub mod resource_groups;
 pub mod stake;
-pub mod transaction_fee;
 
 use anyhow::bail;
 use aptos_framework::{BuildOptions, BuiltPackage, UPGRADE_POLICY_CUSTOM_FIELD};
 pub use harness::*;
-use move_command_line_common::{env::read_bool_env_var, testing::MOVE_COMPILER_V2};
+#[cfg(test)]
 use move_model::metadata::CompilerVersion;
 use move_package::{package_hooks::PackageHooks, source_package::parsed_manifest::CustomDepInfo};
 use move_symbol_pool::Symbol;
@@ -46,10 +45,6 @@ pub(crate) fn build_package(
     package_path: PathBuf,
     options: BuildOptions,
 ) -> anyhow::Result<BuiltPackage> {
-    let mut options = options;
-    if read_bool_env_var(MOVE_COMPILER_V2) {
-        options.compiler_version = Some(CompilerVersion::V2_0);
-    }
     BuiltPackage::build(package_path.to_owned(), options)
 }
 
@@ -60,6 +55,7 @@ pub(crate) fn build_package_with_compiler_version(
     compiler_version: CompilerVersion,
 ) -> anyhow::Result<BuiltPackage> {
     let mut options = options;
+    options.language_version = Some(compiler_version.infer_stable_language_version());
     options.compiler_version = Some(compiler_version);
     BuiltPackage::build(package_path.to_owned(), options)
 }

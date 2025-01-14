@@ -5,7 +5,7 @@
 use crate::{
     account_address::AccountAddress,
     identifier::{IdentStr, Identifier},
-    parser::{parse_struct_tag, parse_type_tag},
+    parser::{parse_module_id, parse_struct_tag, parse_type_tag},
     safe_serialize,
 };
 #[cfg(any(test, feature = "fuzzing"))]
@@ -21,9 +21,14 @@ pub const RESOURCE_TAG: u8 = 1;
 
 /// Hex address: 0x1
 pub const CORE_CODE_ADDRESS: AccountAddress = AccountAddress::ONE;
+pub const TOKEN_ADDRESS: AccountAddress = AccountAddress::THREE;
+pub const TOKEN_OBJECTS_ADDRESS: AccountAddress = AccountAddress::FOUR;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Hash, Eq, Clone, PartialOrd, Ord)]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    any(test, feature = "fuzzing"),
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 pub enum TypeTag {
     // alias for compatibility with old json serialized data.
     #[serde(rename = "bool", alias = "Bool")]
@@ -102,14 +107,19 @@ impl FromStr for TypeTag {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Hash, Eq, Clone, PartialOrd, Ord)]
-#[cfg_attr(any(test, feature = "fuzzing"), derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
+#[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
+#[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
 pub struct StructTag {
     pub address: AccountAddress,
     pub module: Identifier,
     pub name: Identifier,
     // alias for compatibility with old json serialized data.
     #[serde(rename = "type_args", alias = "type_params")]
-    pub type_params: Vec<TypeTag>,
+    pub type_args: Vec<TypeTag>,
 }
 
 impl StructTag {
@@ -157,10 +167,10 @@ impl StructTag {
     /// to change and should not be used inside stable code.
     pub fn to_canonical_string(&self) -> String {
         let mut generics = String::new();
-        if let Some(first_ty) = self.type_params.first() {
+        if let Some(first_ty) = self.type_args.first() {
             generics.push('<');
             generics.push_str(&first_ty.to_canonical_string());
-            for ty in self.type_params.iter().skip(1) {
+            for ty in self.type_args.iter().skip(1) {
                 generics.push_str(&ty.to_canonical_string())
             }
             generics.push('>');
@@ -210,7 +220,10 @@ impl ResourceKey {
 /// Represents the initial key into global storage where we first index by the address, and then
 /// the struct tag. The struct fields are public to support pattern matching.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Hash, Eq, Clone, PartialOrd, Ord)]
-#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+#[cfg_attr(
+    feature = "fuzzing",
+    derive(arbitrary::Arbitrary, dearbitrary::Dearbitrary)
+)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
 pub struct ModuleId {
@@ -221,6 +234,14 @@ pub struct ModuleId {
 impl From<ModuleId> for (AccountAddress, Identifier) {
     fn from(module_id: ModuleId) -> Self {
         (module_id.address, module_id.name)
+    }
+}
+
+impl FromStr for ModuleId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_module_id(s)
     }
 }
 
@@ -283,10 +304,10 @@ impl Display for StructTag {
             self.module,
             self.name
         )?;
-        if let Some(first_ty) = self.type_params.first() {
+        if let Some(first_ty) = self.type_args.first() {
             write!(f, "<")?;
             write!(f, "{}", first_ty)?;
-            for ty in self.type_params.iter().skip(1) {
+            for ty in self.type_args.iter().skip(1) {
                 write!(f, ", {}", ty)?;
             }
             write!(f, ">")?;
@@ -348,11 +369,11 @@ mod tests {
             address: AccountAddress::ONE,
             module: Identifier::new("abc").unwrap(),
             name: Identifier::new("abc").unwrap(),
-            type_params: vec![TypeTag::U8],
+            type_args: vec![TypeTag::U8],
         }));
         let b = serde_json::to_string(&a).unwrap();
         let c: TypeTag = serde_json::from_str(&b).unwrap();
-        assert!(a.eq(&c), "Typetag serde error");
+        assert!(a.eq(&c), "Type tag serde error");
         assert_eq!(mem::size_of::<TypeTag>(), 16);
     }
 
@@ -360,7 +381,7 @@ mod tests {
     fn test_nested_type_tag_struct_serde() {
         let mut type_tags = vec![make_type_tag_struct(TypeTag::U8)];
 
-        let limit = MAX_TYPE_TAG_NESTING - 1;
+        let limit = MAX_TYPE_TAG_NESTING;
         while type_tags.len() < limit.into() {
             type_tags.push(make_type_tag_struct(type_tags.last().unwrap().clone()));
         }
@@ -384,7 +405,7 @@ mod tests {
     fn test_nested_type_tag_vector_serde() {
         let mut type_tags = vec![make_type_tag_struct(TypeTag::U8)];
 
-        let limit = MAX_TYPE_TAG_NESTING - 1;
+        let limit = MAX_TYPE_TAG_NESTING;
         while type_tags.len() < limit.into() {
             type_tags.push(make_type_tag_vector(type_tags.last().unwrap().clone()));
         }
@@ -408,12 +429,12 @@ mod tests {
         TypeTag::Vector(Box::new(type_param))
     }
 
-    fn make_type_tag_struct(type_param: TypeTag) -> TypeTag {
+    fn make_type_tag_struct(type_arg: TypeTag) -> TypeTag {
         TypeTag::Struct(Box::new(StructTag {
             address: AccountAddress::ONE,
             module: Identifier::new("a").unwrap(),
             name: Identifier::new("a").unwrap(),
-            type_params: vec![type_param],
+            type_args: vec![type_arg],
         }))
     }
 

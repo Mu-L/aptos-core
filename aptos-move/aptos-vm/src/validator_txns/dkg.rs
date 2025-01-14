@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    aptos_vm::get_or_vm_startup_failure,
+    aptos_vm::get_system_transaction_output,
     errors::expect_only_successful_execution,
     move_vm_ext::{AptosMoveResolver, SessionId},
     system_module_names::{FINISH_WITH_DKG_RESULT, RECONFIGURATION_WITH_DKG_MODULE},
@@ -14,18 +14,20 @@ use crate::{
 };
 use aptos_types::{
     dkg::{DKGState, DKGTrait, DKGTranscript, DefaultDKG},
-    fee_statement::FeeStatement,
     move_utils::as_move_value::AsMoveValue,
     on_chain_config::{ConfigurationResource, OnChainConfig},
-    transaction::{ExecutionStatus, TransactionStatus},
+    transaction::TransactionStatus,
 };
 use aptos_vm_logging::log_schema::AdapterLogSchema;
-use aptos_vm_types::output::VMOutput;
+use aptos_vm_types::{
+    module_and_script_storage::module_storage::AptosModuleStorage, output::VMOutput,
+};
 use move_core_types::{
     account_address::AccountAddress,
     value::{serialize_values, MoveValue},
     vm_status::{AbortLocation, StatusCode, VMStatus},
 };
+use move_vm_runtime::module_traversal::{TraversalContext, TraversalStorage};
 use move_vm_types::gas::UnmeteredGasMeter;
 
 #[derive(Debug)]
@@ -50,11 +52,18 @@ impl AptosVM {
     pub(crate) fn process_dkg_result(
         &self,
         resolver: &impl AptosMoveResolver,
+        module_storage: &impl AptosModuleStorage,
         log_context: &AdapterLogSchema,
         session_id: SessionId,
         dkg_transcript: DKGTranscript,
     ) -> Result<(VMStatus, VMOutput), VMStatus> {
-        match self.process_dkg_result_inner(resolver, log_context, session_id, dkg_transcript) {
+        match self.process_dkg_result_inner(
+            resolver,
+            module_storage,
+            log_context,
+            session_id,
+            dkg_transcript,
+        ) {
             Ok((vm_status, vm_output)) => Ok((vm_status, vm_output)),
             Err(Expected(failure)) => {
                 // Pretend we are inside Move, and expected failures are like Move aborts.
@@ -70,6 +79,7 @@ impl AptosVM {
     fn process_dkg_result_inner(
         &self,
         resolver: &impl AptosMoveResolver,
+        module_storage: &impl AptosModuleStorage,
         log_context: &AdapterLogSchema,
         session_id: SessionId,
         dkg_node: DKGTranscript,
@@ -99,12 +109,13 @@ impl AptosVM {
 
         // All check passed, invoke VM to publish DKG result on chain.
         let mut gas_meter = UnmeteredGasMeter;
-        let mut session = self.new_session(resolver, session_id);
+        let mut session = self.new_session(resolver, session_id, None);
         let args = vec![
             MoveValue::Signer(AccountAddress::ONE),
             dkg_node.transcript_bytes.as_move_value(),
         ];
 
+        let traversal_storage = TraversalStorage::new();
         session
             .execute_function_bypass_visibility(
                 &RECONFIGURATION_WITH_DKG_MODULE,
@@ -112,17 +123,19 @@ impl AptosVM {
                 vec![],
                 serialize_values(&args),
                 &mut gas_meter,
+                &mut TraversalContext::new(&traversal_storage),
+                module_storage,
             )
             .map_err(|e| {
                 expect_only_successful_execution(e, FINISH_WITH_DKG_RESULT.as_str(), log_context)
             })
             .map_err(|r| Unexpected(r.unwrap_err()))?;
 
-        let output = crate::aptos_vm::get_system_transaction_output(
+        let output = get_system_transaction_output(
             session,
-            FeeStatement::zero(),
-            ExecutionStatus::Success,
-            &get_or_vm_startup_failure(&self.storage_gas_params, log_context)
+            module_storage,
+            &self
+                .storage_gas_params(log_context)
                 .map_err(Unexpected)?
                 .change_set_configs,
         )
